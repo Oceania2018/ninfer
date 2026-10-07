@@ -181,6 +181,10 @@ void EngineCore<Instance>::publish_runtime_stats() {
     snapshot.host_context_reserved_bytes      = physical.host_reserved_bytes;
     snapshot.host_context_peak_occupied_bytes = physical.host_peak_occupied_bytes;
     snapshot.materializing_requests           = materializing_.has_value() ? 1U : 0U;
+    const auto& lineage                       = resources_.lineage_stats();
+    snapshot.lineage_retired_public           = lineage.retired_public;
+    snapshot.lineage_retired_private          = lineage.retired_private;
+    snapshot.lineage_boosted_captures         = lineage.boosted_captures;
     for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
         if (slots_[lane] == nullptr) { continue; }
         ++snapshot.running_requests;

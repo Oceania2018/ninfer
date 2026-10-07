@@ -19,6 +19,8 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <exception>
 #include <future>
@@ -80,7 +82,8 @@ public:
           max_outstanding_(static_cast<std::size_t>(options.max_concurrency) +
                            options.max_pending_requests),
           pending_timeout_(std::chrono::milliseconds(options.pending_timeout_ms)),
-          resources_(options.context_cache.enabled, std::move(context_cost)) {
+          resources_(options.context_cache.enabled, std::move(context_cost),
+                     options.context_cache.lineage_checkpoints) {
         if (max_concurrency_ == 0 || max_concurrency_ > kMaximumConcurrency ||
             options.max_pending_requests == 0 || pending_timeout_.count() <= 0) {
             throw std::invalid_argument("Engine core bounds are invalid");
@@ -1222,6 +1225,26 @@ private:
         context_owner_ = request;
     }
 
+    // Capture-admission trace on stderr, enabled with NINFER_CACHE_DIAG=1.
+    template <class Capture>
+    void cache_diag(const std::shared_ptr<Request>& request, const Capture& capture,
+                    int demand_reused, unsigned long long last_demand, const char* outcome) {
+        static const bool enabled = [] {
+            const char* value = std::getenv("NINFER_CACHE_DIAG");
+            return value && *value == '1';
+        }();
+        if (!enabled) { return; }
+        const auto usage = instance_.program->physical_usage();
+        std::fprintf(stderr,
+                     "[cache-diag] req=%llu frontier=%u %s short{state=%u main=%u backend=%u "
+                     "host=%zu} need_host=%zu host_free=%zu demand_reused=%d last=%llu\n",
+                     static_cast<unsigned long long>(request->id), capture.frontier, outcome,
+                     capture.shortage.state_slots, capture.shortage.main_kv_pages,
+                     capture.shortage.backend_kv_pages, capture.shortage.host_bytes,
+                     capture.host_bytes, usage.capacity.host_bytes - usage.occupied.host_bytes,
+                     demand_reused, last_demand);
+    }
+
     bool prepare_semantic_capture(const std::shared_ptr<Request>& request) {
         auto& decision = capture_decisions_[request->lane->value];
         if (decision && decision->sequence != *request->sequence) { decision.reset(); }
@@ -1230,15 +1253,18 @@ private:
         }
         while (const auto capture = instance_.program->prepare_capture(*request->sequence)) {
             if (capture->reserved) {
+                cache_diag(request, *capture, -1, 0, "ok-direct");
                 decision.reset();
                 return true;
             }
             if (instance_.program->has_context_transaction()) { return false; }
-            const auto admission = resources_.capture_admission(
+            const bool input_capture = instance_.program->capture_is_input(*request->sequence);
+            const auto admission     = resources_.capture_admission(
                 *instance_.program, request->continuation_owner, *request->base_plan,
                 capture->frontier,
-                instance_.program->capture_is_input(*request->sequence) &&
-                    !capture->shortage.main_kv_pages && !capture->shortage.backend_kv_pages);
+                input_capture && !capture->shortage.main_kv_pages &&
+                    !capture->shortage.backend_kv_pages,
+                input_capture);
             if (!decision || decision->frontier != capture->frontier) {
                 decision.emplace(
                     CaptureDecision{*request->sequence, capture->frontier,
@@ -1256,6 +1282,7 @@ private:
                     if (!victims->empty()) { scheduler_.capacity_released(); }
                     if (const auto retry = instance_.program->prepare_capture(*request->sequence);
                         retry && retry->reserved) {
+                        cache_diag(request, *capture, int(admission.demand.reused), admission.demand.last_demand, "ok-host-victims");
                         decision.reset();
                         return true;
                     }
@@ -1265,6 +1292,8 @@ private:
                 resources_.reclaim(*instance_.program, capture->shortage, {}, decision->reclaim);
             if (progress == ReclaimProgress::Transferring) { return false; }
             if (progress == ReclaimProgress::Changed) { continue; }
+            ++cumulative_stats_.captures_skipped;
+            cache_diag(request, *capture, int(admission.demand.reused), admission.demand.last_demand, "SKIP");
             instance_.program->skip_capture(*request->sequence);
             decision.reset();
         }

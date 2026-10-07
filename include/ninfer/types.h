@@ -133,6 +133,10 @@ struct ContextCacheOptions {
     // This does not bound total process RAM.
     // Engine::options() returns both resolved capacities after construction.
     std::optional<std::size_t> host_capacity_bytes;
+    // Superseded public prefix points kept per request chain before older ones are retired
+    // (0 disables chain bounding). A chain is the run of public points each resumed from the
+    // previous one exactly once, as an agent loop that replaces its last turn produces.
+    std::uint32_t lineage_checkpoints = 4;
 };
 
 struct ContextCostOptions {
@@ -1013,6 +1017,12 @@ struct RuntimeStats {
     std::uint32_t terminal_pending_requests = 0;
     std::uint64_t active_captures_completed = 0;
     std::uint64_t active_captures_aborted   = 0;
+    // Optional captures dropped because no admissible space could be reclaimed for them.
+    std::uint64_t captures_skipped          = 0;
+    // Per-chain checkpoint bounding (ContextCacheOptions::lineage_checkpoints).
+    std::uint64_t lineage_retired_public    = 0;
+    std::uint64_t lineage_retired_private   = 0;
+    std::uint64_t lineage_boosted_captures  = 0;
     std::uint64_t preemptions               = 0;
     std::uint64_t snapshot_restores         = 0;
     std::uint64_t replay_restores           = 0;

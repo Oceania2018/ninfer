@@ -76,8 +76,22 @@ public:
         std::uint64_t ordinal           = 0;
     };
 
-    explicit ResourceManager(bool enabled, ContextMachineCostModel costs)
-        : enabled_(enabled), costs_(std::move(costs)) {}
+    // `lineage_checkpoints` bounds superseded public points per request chain (0 disables it).
+    // An agent loop that replaces its last turn every step publishes one public point per step
+    // and resumes each step from the previous one exactly once. Without a per-chain bound those
+    // adopted-once points stay reuse-tier forever and, once Host is full, starve the next
+    // step's capture of admission. See `supersede`.
+    explicit ResourceManager(bool enabled, ContextMachineCostModel costs,
+                             std::uint32_t lineage_checkpoints = 0)
+        : enabled_(enabled), lineage_cap_(lineage_checkpoints), costs_(std::move(costs)) {}
+
+    struct LineageStats {
+        std::uint64_t retired_public  = 0;
+        std::uint64_t retired_private = 0;
+        std::uint64_t boosted_captures = 0;
+    };
+
+    [[nodiscard]] const LineageStats& lineage_stats() const { return lineage_stats_; }
 
     [[nodiscard]] std::vector<SourceChoice>
     candidates(Program& program, const Base& base, std::uint32_t maximum_frontier = UINT32_MAX,
@@ -292,6 +306,7 @@ public:
         OwnerToken token = 0;
         CacheRetentionPriority priority;
         std::uint32_t proven_frontier = 0;
+        Shared* adopted_shared        = nullptr;
         if (choice.resume_owner) {
             token = *choice.resume_owner;
             if (!find_owner(token)) { throw std::logic_error("resume lost continuation owner"); }
@@ -314,6 +329,7 @@ public:
                     if (choice.take_over) { token = owner->token; }
                 } else if (auto* shared = find_shared(choice.shared_entry)) {
                     shared->priority = {.reused = true, .last_demand = used_at};
+                    adopted_shared   = shared;
                 }
             }
             if (!token) {
@@ -327,6 +343,9 @@ public:
         auto* owner              = find_owner(token);
         owner->active            = true;
         owner->publication_order = publication_order;
+        if (lineage_cap_ && !choice.resume_owner) {
+            note_lineage(program, *owner, adopted_shared, choice.source.reused_tokens);
+        }
         replace_points(program, *owner, carried);
         prune(program);
         balance_reused(program);
@@ -349,6 +368,26 @@ public:
                      .priority = demand_priority(program.checkpoint_key(handle, summary.frontier)),
                      .retained_at = ++clock_});
                 index_.insert(program, handle, summary.frontier);
+                if (lineage_cap_) {
+                    if (const auto* owner = find_owner(token);
+                        owner && owner->lineage && summary.frontier > owner->adopted_frontier) {
+                        auto& entry     = shared_.back();
+                        entry.lineage   = owner->lineage;
+                        entry.parent    = owner->adopted_shared;
+                        entry.publisher = token;
+                        // The chain's head is what the next step resumes from. Fresh and not yet
+                        // adopted it would be the cheapest victim in Host (its loss is only one
+                        // step over the point behind it), so one-off requests between steps
+                        // evicted it every time. It carries the demand of the point it extends.
+                        if (const auto* adopted = find_shared(owner->adopted_shared);
+                            adopted && adopted->priority.reused && !entry.priority.reused) {
+                            entry.priority = adopted->priority;
+                        }
+                        // `entry` may move below; it is not used again.
+                        retire_dead_siblings(program, owner->lineage, token);
+                        supersede(program, owner->adopted_shared, owner->lineage);
+                    }
+                }
             }
         } else {
             auto* owner = find_owner(token);
@@ -465,8 +504,24 @@ public:
 
     [[nodiscard]] Admission capture_admission(Program&, OwnerToken owner, const Base& base,
                                               std::uint32_t frontier,
-                                              bool inherit_private = true) const {
-        const auto demand = demand_priority(base.prefix_shortlist_key(frontier));
+                                              bool inherit_private = true,
+                                              bool input_capture   = false) const {
+        auto demand = demand_priority(base.prefix_shortlist_key(frontier));
+        // Extending the non-root public point this request resumed from is the chain's next
+        // step: in an agent loop it is what the next request resumes from. It carries the
+        // adopted point's demand instead of the one-step coverage budget, which a full Host of
+        // older history otherwise never lets it meet. The input point at the end of the prompt
+        // is excluded: that is the turn the next step replaces.
+        if (lineage_cap_ && !demand.reused && !input_capture) {
+            if (const auto* entry = find_owner(owner);
+                entry && entry->adopted_shared && frontier > entry->adopted_frontier) {
+                if (const auto* adopted = find_shared(entry->adopted_shared);
+                    adopted && adopted->parent && adopted->priority.reused) {
+                    demand = adopted->priority;
+                    ++lineage_stats_.boosted_captures;
+                }
+            }
+        }
         // A recurrent continuation's heat can rank its owner, but a new optional point
         // has not itself demonstrated repeat demand. Its added coverage remains bounded.
         auto priority = demand;
@@ -822,6 +877,11 @@ private:
         bool active                     = false;
         std::optional<SessionKey> session;
         std::vector<Point> points;
+        // The chain this request's public captures extend, and the public point it resumed
+        // from (0 when it started from a private point or from the root).
+        std::uint64_t lineage          = 0;
+        std::uint64_t adopted_shared   = 0;
+        std::uint32_t adopted_frontier = 0;
     };
 
     struct Shared {
@@ -829,6 +889,14 @@ private:
         std::uint64_t ordinal;
         CacheRetentionPriority priority;
         std::uint64_t retained_at;
+        std::uint64_t lineage = 0;
+        // The public point the publishing request resumed from. Zero marks a root: a point
+        // published without resuming from public history (system prompt, run goal) is never
+        // superseded by the chains that grow from it.
+        std::uint64_t parent      = 0;
+        OwnerToken publisher      = 0;
+        std::uint32_t adoptions   = 0;
+        std::uint64_t superseded  = 0;  // clock when a deeper point of its chain replaced it
     };
 
     static bool contains(std::span<const Handle> handles, Handle handle) {
@@ -851,6 +919,112 @@ private:
         const auto it = std::find_if(shared_.begin(), shared_.end(),
                                      [&](const auto& entry) { return entry.ordinal == ordinal; });
         return it == shared_.end() ? nullptr : &*it;
+    }
+
+    const Shared* find_shared(std::uint64_t ordinal) const {
+        const auto it = std::find_if(shared_.begin(), shared_.end(),
+                                     [&](const auto& entry) { return entry.ordinal == ordinal; });
+        return it == shared_.end() ? nullptr : &*it;
+    }
+
+    // Where this request sits in a chain of public points. Resuming from a non-root public
+    // point continues that point's chain; resuming from a root (or from nothing public) starts
+    // a new one, so concurrent agent runs sharing a system prompt keep separate chains.
+    void note_lineage(Program& program, Owner& owner, Shared* adopted, std::uint32_t reused) {
+        owner.adopted_shared   = 0;
+        owner.adopted_frontier = reused;
+        if (!adopted) {
+            owner.lineage = ++ordinal_;
+            return;
+        }
+        // A second reader makes the point a branch: it is no longer one step's leftover.
+        if (++adopted->adoptions > 1) { adopted->superseded = 0; }
+        owner.adopted_shared = adopted->ordinal;
+        owner.lineage        = adopted->parent ? adopted->lineage : ++ordinal_;
+        if (!adopted->parent || !adopted->publisher || adopted->publisher == owner.token) {
+            return;
+        }
+        // The request that published this point went on past it (its screenshot turn, its
+        // output) and this request diverged there. Those private points can no longer serve
+        // the chain; holding them is what fills Host with one dead endpoint per step.
+        auto* publisher = find_owner(adopted->publisher);
+        if (!publisher || publisher->active) { return; }
+        std::vector<Handle> dead;
+        for (const auto& point : publisher->points) {
+            if (!program.valid_checkpoint(point.handle)) { continue; }
+            const auto summary = program.checkpoint_metadata(point.handle);
+            if (summary.frontier > reused && !summary.leased) { dead.push_back(point.handle); }
+        }
+        for (const auto handle : dead) {
+            if (remove_point(program, *publisher, handle)) { ++lineage_stats_.retired_private; }
+        }
+    }
+
+    // A deeper point of the same chain was just published from `parent_ordinal`. The parent was
+    // adopted exactly once and is now behind the chain's head: keep the newest
+    // `lineage_cap_` such points (for retries and rewinds) and retire older ones outright,
+    // without the optional-capture admission comparison they would otherwise win forever.
+    void supersede(Program& program, std::uint64_t parent_ordinal, std::uint64_t lineage) {
+        auto* parent = find_shared(parent_ordinal);
+        if (!parent || !parent->parent || parent->lineage != lineage || parent->adoptions > 1 ||
+            parent->superseded) {
+            return;
+        }
+        parent->superseded = ++clock_;
+        // Behind the head it is only a retry fallback: first in line when space is short.
+        parent->priority.reused = false;
+        for (;;) {
+            Shared* oldest    = nullptr;
+            std::size_t count = 0;
+            for (auto& entry : shared_) {
+                if (entry.lineage != lineage || !entry.superseded) { continue; }
+                ++count;
+                if (!oldest || entry.superseded < oldest->superseded) { oldest = &entry; }
+            }
+            if (count <= lineage_cap_) { return; }
+            // A point that cannot go now (leased, held by a waiting request) drops out of the
+            // count and falls back to ordinary retention.
+            if (!retire_shared(program, *oldest)) { oldest->superseded = 0; }
+        }
+    }
+
+    // A later step of the chain has published, so points an earlier step published that nobody
+    // resumed from (the end of its screenshot turn) are dead: the chain moved on without them.
+    // Without this they would keep the head priority they inherited for good.
+    void retire_dead_siblings(Program& program, std::uint64_t lineage, OwnerToken publisher) {
+        std::vector<std::uint64_t> dead;
+        for (const auto& entry : shared_) {
+            if (entry.lineage == lineage && entry.publisher != publisher && !entry.adoptions &&
+                !entry.superseded) {
+                dead.push_back(entry.ordinal);
+            }
+        }
+        for (const auto ordinal : dead) {
+            if (const auto* entry = find_shared(ordinal)) { (void)retire_shared(program, *entry); }
+        }
+    }
+
+    bool retire_shared(Program& program, const Shared& entry) {
+        const auto handle  = entry.handle;
+        const auto ordinal = entry.ordinal;
+        if (std::any_of(waiting_.begin(), waiting_.end(),
+                        [&](const auto& waiting) { return contains(waiting.held, handle); })) {
+            return false;
+        }
+        if (catalog_reference_count(handle) > 1) {
+            // A private point at the same position keeps the contents; only the public entry goes.
+            std::erase_if(shared_, [&](const auto& item) { return item.ordinal == ordinal; });
+            ++lineage_stats_.retired_public;
+            return true;
+        }
+        if (program.valid_checkpoint(handle)) {
+            if (program.checkpoint_metadata(handle).leased || !program.release_checkpoint(handle)) {
+                return false;
+            }
+        }
+        forget(handle);
+        ++lineage_stats_.retired_public;
+        return true;
     }
 
     std::size_t catalog_reference_count(Handle handle) const {
@@ -1448,6 +1622,9 @@ private:
     }
 
     bool enabled_;
+    std::uint32_t lineage_cap_ = 0;
+    // Diagnostics only; counted from const admission queries too.
+    mutable LineageStats lineage_stats_;
     ContextMachineCostModel costs_;
     PrefixIndex<Model> index_;
     std::vector<Owner> owners_;

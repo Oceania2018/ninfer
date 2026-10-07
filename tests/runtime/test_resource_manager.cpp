@@ -535,9 +535,10 @@ struct Fixture {
     Cache cache;
     std::uint64_t next_order = 0;
 
-    explicit Fixture(std::size_t capacity)
+    explicit Fixture(std::size_t capacity, std::uint32_t lineage_checkpoints = 0)
         : program{.host_capacity = capacity},
-          cache(true, {.prefill = {.token_ns_q32 = ninfer::runtime::kContextCostQ32One}}) {}
+          cache(true, {.prefill = {.token_ns_q32 = ninfer::runtime::kContextCostQ32One}},
+                lineage_checkpoints) {}
 
     Cache::SourceChoice source(const Base& base, std::optional<Handle> desired,
                                std::optional<Token> resume = {}) {
@@ -1874,10 +1875,162 @@ void test_consuming_rewind_resets_proven_progress_to_the_adopted_prefix() {
             "an abandoned deep branch remained the proof after a consuming rewind");
 }
 
+Key concat(Key head, const Key& tail) {
+    head.insert(head.end(), tail.begin(), tail.end());
+    return head;
+}
+
+// One agent-loop step, as a computer-use client sends it: the shared history so far, then a
+// fresh screenshot turn that the next step drops. The request resumes from `source`, publishes
+// the end of its history as a public point, and leaves its own input point and endpoint behind.
+struct LoopStep {
+    Fixture::Token owner;
+    Handle history;
+    Handle screen_end;
+    Handle input;
+    Handle endpoint;
+};
+
+LoopStep loop_step(Fixture& f, std::optional<Handle> source, std::uint32_t history_tokens,
+                   std::uint32_t step) {
+    const auto screenshot = tokens(20, 100000 + 100 * step);
+    const Base request{.tokens = concat(tokens(history_tokens), screenshot)};
+    const auto owner   = f.begin(request, source);
+    const auto history = f.program.add(tokens(history_tokens));
+    f.cache.publish(f.program, owner, history);
+    // The automatic public point at the end of the screenshot turn.
+    const auto screen_end = f.program.add(request.tokens);
+    f.cache.publish(f.program, owner, screen_end);
+    const auto input = f.program.add(request.tokens, {}, Role::InputReplay);
+    const auto endpoint =
+        f.program.add(concat(request.tokens, tokens(5, 900000 + 100 * step)), {}, Role::Continuation);
+    f.cache.publish(f.program, owner, input);
+    f.cache.publish(f.program, owner, endpoint);
+    f.cache.finish(f.program, owner, request, f.next_order);
+    return {owner, history, screen_end, input, endpoint};
+}
+
+void test_lineage_keeps_only_the_newest_superseded_history_points() {
+    Fixture f(0, 2);
+    const auto system = f.program.add(tokens(100));
+    f.publish(system);
+    // Step 1 resumes from the root and publishes the run goal; each later step resumes from
+    // the previous step's history point.
+    std::vector<LoopStep> steps{loop_step(f, system, 150, 1)};
+    for (std::uint32_t step = 2; step <= 8; ++step) {
+        steps.push_back(loop_step(f, steps.back().history, 150 + 10 * step, step));
+    }
+    require(f.program.valid_checkpoint(system), "the root a chain grew from was retired");
+    // Head (step 8) plus two superseded points (steps 6 and 7) survive; steps 1-5 are gone.
+    for (std::size_t i = 0; i < steps.size(); ++i) {
+        const bool alive = f.program.valid_checkpoint(steps[i].history);
+        require(alive == (i >= steps.size() - 3), "chain kept the wrong history points");
+    }
+    // Every step but the last has been resumed past: its screenshot points and endpoint are dead.
+    for (std::size_t i = 0; i + 1 < steps.size(); ++i) {
+        require(!f.program.valid_checkpoint(steps[i].input) &&
+                    !f.program.valid_checkpoint(steps[i].endpoint) &&
+                    !f.program.valid_checkpoint(steps[i].screen_end),
+                "a diverged step's screenshot point, input or endpoint survived");
+    }
+    require(f.program.valid_checkpoint(steps.back().input) &&
+                f.program.valid_checkpoint(steps.back().endpoint) &&
+                f.program.valid_checkpoint(steps.back().screen_end),
+            "the newest step's points were retired before anyone resumed past them");
+    require(f.cache.lineage_stats().retired_public == 5 + 7, "retired-point count is wrong");
+    // The next step still resumes from the head.
+    const Base next{.tokens = concat(tokens(240), tokens(20, 555555))};
+    const auto best = f.cache.candidates(f.program, next).front();
+    require(best.source.checkpoint == steps.back().history, "head of the chain is not the source");
+}
+
+void test_lineage_head_survives_one_off_captures() {
+    Fixture f(0, 4);
+    const auto system = f.program.add(tokens(100));
+    f.publish(system);
+    auto head = loop_step(f, system, 150, 1);
+    for (std::uint32_t step = 2; step <= 4; ++step) {
+        head = loop_step(f, head.history, 150 + 10 * step, step);
+    }
+    // One-off requests between steps (a grounding call on a crop) want space for their own
+    // points. Behind the head sits a point only one step shorter, so by recovery loss alone the
+    // head is the cheapest thing in the cache; it must still not be what they take.
+    const Base one_off{.tokens = tokens(60, 700000)};
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        auto cursor =
+            f.cache.begin_reclaim(f.program, f.cache.capture_admission(f.program, 0, one_off, 60));
+        if (f.cache.reclaim(f.program, {.state_slots = 1}, {}, cursor) !=
+            ninfer::runtime::ReclaimProgress::Changed) {
+            break;
+        }
+    }
+    require(f.program.valid_checkpoint(head.history),
+            "a one-off capture evicted the head the next step resumes from");
+}
+
+void test_lineage_point_adopted_twice_is_a_branch_and_kept() {
+    Fixture f(0, 1);
+    const auto system = f.program.add(tokens(100));
+    f.publish(system);
+    auto first  = loop_step(f, system, 150, 1);
+    auto second = loop_step(f, first.history, 160, 2);
+    // A retry resumes from the same point again before the chain moves on.
+    (void)f.begin(Base{.tokens = concat(tokens(160), tokens(20, 777777))}, second.history);
+    auto head = second;
+    for (std::uint32_t step = 3; step <= 6; ++step) {
+        head = loop_step(f, step == 3 ? second.history : head.history, 150 + 10 * step, step);
+    }
+    require(f.program.valid_checkpoint(second.history),
+            "a point two requests resumed from was retired as a one-step leftover");
+    require(!f.program.valid_checkpoint(first.history), "an ordinary leftover was not retired");
+}
+
+void test_lineage_bound_disabled_keeps_previous_behavior() {
+    Fixture f(0);
+    const auto system = f.program.add(tokens(100));
+    f.publish(system);
+    std::vector<LoopStep> steps{loop_step(f, system, 150, 1)};
+    for (std::uint32_t step = 2; step <= 6; ++step) {
+        steps.push_back(loop_step(f, steps.back().history, 150 + 10 * step, step));
+    }
+    for (const auto& step : steps) {
+        require(f.program.valid_checkpoint(step.history) && f.program.valid_checkpoint(step.endpoint),
+                "disabled chain bounding retired history");
+    }
+    require(f.cache.lineage_stats().retired_public == 0 &&
+                f.cache.lineage_stats().retired_private == 0,
+            "disabled chain bounding counted retirements");
+}
+
+void test_lineage_capture_inherits_the_extended_points_demand() {
+    Fixture f(0, 4);
+    const auto system = f.program.add(tokens(100));
+    f.publish(system);
+    const auto first = loop_step(f, system, 150, 1);
+    // Resuming from the root starts a chain: its first capture is not boosted.
+    const Base from_root{.tokens = concat(tokens(150), tokens(20, 424242))};
+    const auto root_owner = f.begin(from_root, system);
+    require(!f.cache.capture_admission(f.program, root_owner, from_root, 150, false).priority.reused,
+            "a capture extending a root borrowed the root's demand");
+    f.cache.abandon(f.program, root_owner);
+    // Resuming from a chain point: the next history capture carries that point's demand.
+    const Base step{.tokens = concat(tokens(160), tokens(20, 434343))};
+    const auto owner     = f.begin(step, first.history);
+    const auto admission = f.cache.capture_admission(f.program, owner, step, 160, false);
+    require(admission.priority.reused && admission.demand.reused &&
+                f.cache.lineage_stats().boosted_captures == 1,
+            "the chain's next capture did not inherit the extended point's demand");
+}
+
 } // namespace
 
 int main() {
     try {
+        test_lineage_keeps_only_the_newest_superseded_history_points();
+        test_lineage_head_survives_one_off_captures();
+        test_lineage_point_adopted_twice_is_a_branch_and_kept();
+        test_lineage_bound_disabled_keeps_previous_behavior();
+        test_lineage_capture_inherits_the_extended_points_demand();
         test_demotion_competes_with_its_actual_host_recovery_loss();
         test_adjacent_kv_demotions_share_one_submission();
         test_kv_demotion_batch_stops_at_an_intervening_delete();
