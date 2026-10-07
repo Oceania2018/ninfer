@@ -21,6 +21,7 @@ enum class OpenAIPromptCacheAutomatic : std::uint8_t {
 
 struct OpenAIPromptCachePolicy {
     OpenAIPromptCacheAutomatic automatic = OpenAIPromptCacheAutomatic::Default;
+    CtxCheckpointBoundaries boundaries   = CtxCheckpointBoundaries::Off;
 };
 
 [[nodiscard]] bool parse_openai_prompt_cache_breakpoint(const RequestJson& value,

@@ -356,11 +356,13 @@ Host 先释放安全的重复副本，再对有限物理动作作完整预检：
 A computer-use agent (CUA) loop resumes every step from the previous step's history point exactly
 once. Under the general rules above those adopted-once points stay reuse-tier, and the fresh chain
 head is the cheapest victim for one-off requests, so once Host is full each step falls back to an
-older point. `--lineage-checkpoints N` (default 4, `0` disables it) tracks public points as request
+older point. `--ctx-checkpoints N` (default 4, `0` disables it) tracks public points as request
 chains: the chain head inherits the demand of the point it extends; superseded points are demoted
 and bounded to the newest N per chain; dead points of earlier steps and their private endpoints are
 retired once the chain resumes past them. Rules, metrics and the CUA evaluation are in
-[Request-chain retention for CUA workloads](cua-lineage-retention.md).
+[Context checkpoints for CUA workloads](cua-context-checkpoints.md); that page also covers
+`--ctx-checkpoint-boundaries turns`, which places the checkpoints of agent-loop requests that mark
+none themselves.
 
 <a id="scheduling"></a>
 ## 8. 调度、抢占与恢复

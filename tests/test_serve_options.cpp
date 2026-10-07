@@ -201,6 +201,22 @@ int main() {
                           context_cache.context_cache.host_capacity_bytes == (64ULL << 20),
                       "context-cache capacities did not reach serving options");
 
+    failures += check(defaults.context_cache.ctx_checkpoints == 4 &&
+                          defaults.ctx_checkpoint_boundaries == CtxCheckpointBoundaries::Off,
+                      "context checkpoint defaults changed");
+    const ServeOptions checkpoints =
+        parse({"ninfer-serve", "model.ninfer", "--ctx-checkpoints", "0",
+               "--ctx-checkpoint-boundaries", "turns"});
+    failures += check(checkpoints.context_cache.ctx_checkpoints == 0 &&
+                          checkpoints.ctx_checkpoint_boundaries == CtxCheckpointBoundaries::Turns,
+                      "context checkpoint options did not reach serving options");
+    bool unknown_boundaries_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--ctx-checkpoint-boundaries", "messages"});
+    } catch (const std::invalid_argument&) { unknown_boundaries_rejected = true; }
+    failures += check(unknown_boundaries_rejected,
+                      "unknown --ctx-checkpoint-boundaries value was accepted");
+
     const ServeOptions zero_host_context =
         parse({"ninfer-serve", "model.ninfer", "--host-context-mib", "0"});
     failures += check(zero_host_context.context_cache.enabled &&

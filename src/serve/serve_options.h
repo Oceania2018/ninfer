@@ -2,6 +2,7 @@
 
 #include "ninfer/types.h"
 #include "product/logging/logging.h"
+#include "serve/request.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -46,6 +47,7 @@ struct ServeOptions {
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     ContextCacheOptions context_cache;
+    CtxCheckpointBoundaries ctx_checkpoint_boundaries = CtxCheckpointBoundaries::Off;
     bool enable_vision      = false;
     bool use_cuda_graph     = true;
     bool allow_prefix_reuse = true;

@@ -192,11 +192,11 @@ std::string Metrics::render(const RuntimeStats& stats, bool ready) const {
             "Initial bindings with checkpoint reuse.");
     COUNTER(captures_skipped, "captures_skipped_total",
             "Optional checkpoint captures dropped for lack of admissible space.");
-    COUNTER(lineage_retired_public, "lineage_retired_public_total",
+    COUNTER(ctx_checkpoint_retired_public, "ctx_checkpoint_retired_public_total",
             "Superseded public chain points retired beyond the per-chain bound.");
-    COUNTER(lineage_retired_private, "lineage_retired_private_total",
+    COUNTER(ctx_checkpoint_retired_private, "ctx_checkpoint_retired_private_total",
             "Private endpoints retired once their chain diverged before them.");
-    COUNTER(lineage_boosted_captures, "lineage_boosted_capture_admissions_total",
+    COUNTER(ctx_checkpoint_boosted_captures, "ctx_checkpoint_boosted_capture_admissions_total",
             "Capture admissions that inherited the demand of the chain point they extend.");
     COUNTER(speculative_rounds, "spec_decode_rounds_total",
             "Native speculative verification rounds.");

@@ -535,10 +535,10 @@ struct Fixture {
     Cache cache;
     std::uint64_t next_order = 0;
 
-    explicit Fixture(std::size_t capacity, std::uint32_t lineage_checkpoints = 0)
+    explicit Fixture(std::size_t capacity, std::uint32_t ctx_checkpoints = 0)
         : program{.host_capacity = capacity},
           cache(true, {.prefill = {.token_ns_q32 = ninfer::runtime::kContextCostQ32One}},
-                lineage_checkpoints) {}
+                ctx_checkpoints) {}
 
     Cache::SourceChoice source(const Base& base, std::optional<Handle> desired,
                                std::optional<Token> resume = {}) {

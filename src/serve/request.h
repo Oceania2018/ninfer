@@ -43,9 +43,17 @@ private:
     ApiError error_;
 };
 
+// Where the server places prompt-cache checkpoints for an OpenAI request that marks none itself
+// (--ctx-checkpoint-boundaries).
+enum class CtxCheckpointBoundaries : std::uint8_t {
+    Off,   // Protocol default: one automatic point at the end of the prompt.
+    Turns, // Agent loops: system, first user turn and the last history turn before the final one.
+};
+
 // Server-side context needed while parsing/validating a request.
 struct RequestLimits {
-    int default_max_tokens = 8192;
+    int default_max_tokens                            = 8192;
+    CtxCheckpointBoundaries ctx_checkpoint_boundaries = CtxCheckpointBoundaries::Off;
 };
 
 enum class ContentKind {

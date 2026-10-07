@@ -836,7 +836,8 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
     }
     output.model = body.at("model").get<std::string>();
 
-    const OpenAIPromptCachePolicy cache_policy = parse_openai_prompt_cache_policy(body);
+    OpenAIPromptCachePolicy cache_policy = parse_openai_prompt_cache_policy(body);
+    cache_policy.boundaries              = limits.ctx_checkpoint_boundaries;
 
     parse_tools(body, output.generation);
     parse_tool_choice(body, output.generation);

@@ -3,10 +3,12 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdio>
 #include <random>
+#include <tuple>
 #include <vector>
 #include <string_view>
 #include <utility>
@@ -108,6 +110,55 @@ OpenAIPromptCachePolicy parse_openai_prompt_cache_policy(const RequestJson& body
     return policy;
 }
 
+namespace {
+
+// The boundary slot at the end of a turn: past its tool calls when it has any, otherwise after its
+// last content part. Empty turns have none.
+std::optional<CacheBoundary>* turn_end_boundary(ChatTurn& turn) {
+    if (!turn.tool_calls.empty()) { return &turn.cache_boundary_after; }
+    if (!turn.content.empty()) { return &turn.content.back().cache_boundary_after; }
+    return nullptr;
+}
+
+// --ctx-checkpoint-boundaries turns, for a request that marks no boundary itself. An agent loop
+// keeps its system prompt and task fixed, appends its last step's turns and replaces the final
+// turn (the fresh observation) every step, so the points worth saving are the end of the first
+// message, the end of the first user turn and the end of the last history turn before the final
+// one; the next step resumes from that last point. Hybrid models resume only from saved points,
+// so without these the only point is the end of the final turn, which no later request shares.
+// Returns the boundaries it placed and whether one of them is a history point.
+std::pair<std::vector<std::optional<CacheBoundary>*>, bool>
+place_turn_boundaries(std::vector<ChatTurn>& messages) {
+    std::vector<std::optional<CacheBoundary>*> placed;
+    const auto first_user = std::find_if(messages.begin(), messages.end(), [](const ChatTurn& t) {
+        return t.role == ChatRole::User;
+    });
+    if (first_user == messages.end()) { return {placed, false}; }
+
+    const auto mark = [&](ChatTurn& turn) {
+        std::optional<CacheBoundary>* slot = turn_end_boundary(turn);
+        if (slot == nullptr || slot->has_value()) { return false; }
+        *slot = CacheBoundary{};
+        placed.push_back(slot);
+        return true;
+    };
+    mark(messages.front());
+    mark(*first_user);
+    bool history = false;
+    const auto history_begin = std::next(first_user);
+    const auto history_end   = std::prev(messages.end());
+    for (auto turn = history_end; turn > history_begin;) {
+        --turn;
+        if (turn_end_boundary(*turn) != nullptr) {
+            history = mark(*turn);
+            break;
+        }
+    }
+    return {placed, history};
+}
+
+} // namespace
+
 void apply_openai_prompt_cache_policy(GenerationRequest& request, OpenAIPromptCachePolicy policy) {
     std::vector<std::optional<CacheBoundary>*> explicit_boundaries;
     for (ToolDefinition& tool : request.tools) {
@@ -126,6 +177,13 @@ void apply_openai_prompt_cache_policy(GenerationRequest& request, OpenAIPromptCa
         }
     }
 
+    // A placed history point makes the end-of-prompt automatic point redundant: it covers the turn
+    // the next step replaces.
+    bool skip_automatic = false;
+    if (explicit_boundaries.empty() && policy.boundaries == CtxCheckpointBoundaries::Turns) {
+        std::tie(explicit_boundaries, skip_automatic) = place_turn_boundaries(request.messages);
+    }
+
     std::optional<CacheBoundary>* automatic_target = nullptr;
     for (auto turn = request.messages.rbegin(); turn != request.messages.rend(); ++turn) {
         if (!turn->tool_calls.empty()) {
@@ -142,7 +200,8 @@ void apply_openai_prompt_cache_policy(GenerationRequest& request, OpenAIPromptCa
     }
 
     const bool automatic_enabled =
-        policy.automatic != OpenAIPromptCacheAutomatic::Disabled && automatic_target != nullptr &&
+        policy.automatic != OpenAIPromptCacheAutomatic::Disabled && !skip_automatic &&
+        automatic_target != nullptr &&
         (automatic_target->has_value() ||
          explicit_boundaries.size() < kMaximumExplicitPromptCacheMarkers);
     const bool automatic_merges_explicit   = automatic_enabled && automatic_target->has_value();

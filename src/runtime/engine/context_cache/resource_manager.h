@@ -76,14 +76,14 @@ public:
         std::uint64_t ordinal           = 0;
     };
 
-    // `lineage_checkpoints` bounds superseded public points per request chain (0 disables it).
+    // `ctx_checkpoints` bounds superseded public points per request chain (0 disables it).
     // An agent loop that replaces its last turn every step publishes one public point per step
     // and resumes each step from the previous one exactly once. Without a per-chain bound those
     // adopted-once points stay reuse-tier forever and, once Host is full, starve the next
     // step's capture of admission. See `supersede`.
     explicit ResourceManager(bool enabled, ContextMachineCostModel costs,
-                             std::uint32_t lineage_checkpoints = 0)
-        : enabled_(enabled), lineage_cap_(lineage_checkpoints), costs_(std::move(costs)) {}
+                             std::uint32_t ctx_checkpoints = 0)
+        : enabled_(enabled), lineage_cap_(ctx_checkpoints), costs_(std::move(costs)) {}
 
     struct LineageStats {
         std::uint64_t retired_public  = 0;

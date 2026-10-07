@@ -281,6 +281,79 @@ int test_prompt_cache_boundaries() {
     return failures;
 }
 
+// --ctx-checkpoint-boundaries turns: an agent-loop step that marks nothing gets points at the end
+// of the system message, the task and the last history turn, and none on the final turn.
+int test_ctx_checkpoint_turn_boundaries() {
+    using Evidence   = ninfer::SharedCandidateEvidence;
+    using Location   = ninfer::PromptCacheMarkerLocation;
+    int failures     = 0;
+    const auto turns = [](Json body) {
+        RequestLimits limits             = ::limits();
+        limits.ctx_checkpoint_boundaries = CtxCheckpointBoundaries::Turns;
+        return prompt(parse_chat_completion_request(body, limits).generation);
+    };
+    // One-based message each marker follows; a leading system message is its own location.
+    const auto after_counts = [](const ninfer::PromptInput& input) {
+        std::vector<std::size_t> counts;
+        for (const auto& marker : input.context_cache.markers) {
+            counts.push_back(marker.location == Location::LeadingInstructionBoundary
+                                 ? 1U
+                                 : marker.after_message_count);
+        }
+        return counts;
+    };
+    const auto all_explicit = [](const ninfer::PromptInput& input) {
+        for (const auto& marker : input.context_cache.markers) {
+            if (marker.evidence != Evidence::ExplicitBoundary) { return false; }
+        }
+        return true;
+    };
+    const Json tool_call =
+        Json{{"id", "call_1"},
+             {"type", "function"},
+             {"function", Json{{"name", "click"}, {"arguments", "{}"}}}};
+
+    Json step = Json{
+        {"model", "qwen"},
+        {"messages",
+         Json::array({Json{{"role", "system"}, {"content", "system"}},
+                      Json{{"role", "user"}, {"content", "task"}},
+                      Json{{"role", "assistant"}, {"tool_calls", Json::array({tool_call})}},
+                      Json{{"role", "tool"}, {"tool_call_id", "call_1"}, {"content", "clicked"}},
+                      Json{{"role", "user"}, {"content", "current screen"}}})}};
+    const auto loop = turns(step);
+    failures += check(after_counts(loop) == std::vector<std::size_t>{1, 2, 4} && all_explicit(loop),
+                      "turn boundaries mark system, task and last history turn, not the final");
+
+    const auto first = turns(Json{
+        {"model", "qwen"},
+        {"messages", Json::array({Json{{"role", "system"}, {"content", "system"}},
+                                  Json{{"role", "user"}, {"content", "task"}}})}});
+    failures += check(after_counts(first) == std::vector<std::size_t>{1, 2} &&
+                          ninfer::has_shared_candidate_evidence(
+                              first.context_cache.markers[1].evidence, Evidence::DefaultAutomatic),
+                      "a first step keeps the automatic point, merged into the task boundary");
+
+    const auto single = turns(base_request());
+    failures += check(after_counts(single) == std::vector<std::size_t>{1},
+                      "a single user message gets one point");
+
+    Json marked = step;
+    marked["messages"][0]["content"] =
+        Json::array({Json{{"type", "text"},
+                          {"text", "system"},
+                          {"prompt_cache_breakpoint", Json{{"mode", "explicit"}}}}});
+    const auto client = turns(marked);
+    failures += check(after_counts(client) == std::vector<std::size_t>{1, 5},
+                      "client boundaries disable placement and keep the automatic point");
+
+    const auto off = prompt(parse(step).generation);
+    failures += check(after_counts(off) == std::vector<std::size_t>{5} &&
+                          off.context_cache.markers[0].evidence == Evidence::DefaultAutomatic,
+                      "boundaries off keeps the protocol's single automatic point");
+    return failures;
+}
+
 int test_constrained_decoding_extensions() {
     int failures               = 0;
     Json body                  = base_request();
@@ -976,6 +1049,7 @@ int main() {
     failures += test_request_envelope_and_sampling();
     failures += test_standard_field_policy();
     failures += test_prompt_cache_boundaries();
+    failures += test_ctx_checkpoint_turn_boundaries();
     failures += test_constrained_decoding_extensions();
     failures += test_tools();
     failures += test_messages_and_media();

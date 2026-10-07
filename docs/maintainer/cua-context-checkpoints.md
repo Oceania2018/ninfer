@@ -1,9 +1,13 @@
-# Request-chain retention for CUA workloads
+# Context checkpoints for CUA workloads
 
-This page covers `--lineage-checkpoints`: why computer-use agent (CUA) traffic lost its prefix
-cache under the general retention rules of
-[Resource scheduling and context cache](resource-scheduling-and-context-cache.md#retention), what
-the chain rules change, and how they were evaluated.
+This page covers the two server options for computer-use agent (CUA) traffic:
+
+- `--ctx-checkpoint-boundaries turns` decides where an agent-loop request saves checkpoints when the
+  client marks none ([§3](#boundaries)).
+- `--ctx-checkpoints N` decides which saved checkpoints stay. It covers why CUA traffic lost its
+  prefix cache under the general retention rules of
+  [Resource scheduling and context cache](resource-scheduling-and-context-cache.md#retention), what
+  the chain rules change, and how they were evaluated.
 
 ## 1. The CUA request pattern
 
@@ -14,10 +18,11 @@ A CUA loop sends one request per step:
 ```
 
 The next step drops the screenshot turn, appends this step's assistant and tool turns, and adds a
-new screenshot. The prompt is append-only except for its last turn. The client (or a proxy in front
-of NInfer) places explicit `prompt_cache_breakpoint` markers at the end of the system message, the
-end of the task, and the end of the last history turn before the screenshot. The next step resumes
-from that last marker. Qwen3.5/3.8 are hybrid (GDN + attention), so a request can only resume from a
+new screenshot. The prompt is append-only except for its last turn. Checkpoints belong at the end
+of the system message, the end of the task, and the end of the last history turn before the
+screenshot; the next step resumes from that last one. Either the client (or a proxy in front of
+NInfer) marks them with `prompt_cache_breakpoint`, or the server places them
+([§3](#boundaries)). Qwen3.5/3.8 are hybrid (GDN + attention), so a request can only resume from a
 position whose state was saved; there is no partial reuse between markers.
 
 A graph walk runs many such loops back to back, one per node, sharing the system prompt. Each step
@@ -42,9 +47,41 @@ walk of about 90 steps with a 20 GiB pool, it stops working:
 The visible symptom is that cached tokens stop advancing inside a node. Every later step falls back
 to the task marker, and prefill grows by one step's history per step.
 
-## 3. Chain rules
+<a id="boundaries"></a>
+## 3. Checkpoint boundaries
 
-`--lineage-checkpoints N` (default `4`, `0` restores the general rules) maintains request chains over
+Without markers, an OpenAI request saves one automatic point at the end of its final turn. In a CUA
+loop that is the screenshot turn the next step replaces, so the next step can only resume from the
+shared system prefix, if at all.
+
+`--ctx-checkpoint-boundaries turns` (default `off`) applies to Chat Completions and Responses
+requests that mark no boundary anywhere (tools or messages):
+
+| Point | Position |
+|---|---|
+| System | End of the first message |
+| Task | End of the first user turn |
+| History | End of the last non-empty turn after the first user turn and before the final turn: after its tool calls for an assistant turn that has them, otherwise after its last content part |
+
+- The points are explicit boundaries, so they count against the limit of four per request and are
+  published as shared prefixes exactly as client markers would be.
+- When a history point is placed, the automatic end-of-prompt point is dropped. It covers the turn
+  the next step replaces, and the request's private endpoint already covers an exact retry.
+- A first step (no history yet) and a single-message request keep the automatic point.
+- A request with any client marker is left as the client marked it.
+
+This is the rule the CUA proxy applied before (§6.1); moving it into the server makes it available
+to every client and keeps placement and retention in one place. A proxy that still marks
+boundaries is unaffected: its markers take precedence.
+
+Implementation: `place_turn_boundaries` in
+[`openai_common.cpp`](../../src/serve/openai_common.cpp); tests
+`test_ctx_checkpoint_turn_boundaries` in
+[`test_openai_schema.cpp`](../../tests/test_openai_schema.cpp).
+
+## 4. Chain rules
+
+`--ctx-checkpoints N` (default `4`, `0` restores the general rules) maintains request chains over
 public entries in `ResourceManager`:
 
 | Rule | Effect |
@@ -62,23 +99,23 @@ Implementation: `note_lineage`, `supersede`, `retire_dead_siblings` and `retire_
 `test_lineage_*` in
 [`test_resource_manager.cpp`](../../tests/runtime/test_resource_manager.cpp).
 
-## 4. Observability
+## 5. Observability
 
 | Signal | Meaning |
 |---|---|
 | `ninfer_captures_skipped_total` | Optional captures dropped for lack of admissible space; previously invisible |
-| `ninfer_lineage_retired_public_total` | Superseded or dead public chain points retired |
-| `ninfer_lineage_retired_private_total` | Private endpoints and input points retired after the chain diverged |
-| `ninfer_lineage_boosted_capture_admissions_total` | Capture admissions that inherited the extended point's demand |
+| `ninfer_ctx_checkpoint_retired_public_total` | Superseded or dead public chain points retired |
+| `ninfer_ctx_checkpoint_retired_private_total` | Private endpoints and input points retired after the chain diverged |
+| `ninfer_ctx_checkpoint_boosted_capture_admissions_total` | Capture admissions that inherited the extended point's demand |
 | `NINFER_CACHE_DIAG=1` | Prints one stderr line per capture decision (`ok-direct`, `ok-host-victims`, `SKIP`) with the shortage, free Host bytes and admission demand |
 
 In CUA traffic, most skipped captures come from one-off grounding requests; that is expected.
 The useful check is the per-request `cache N` in the request log: inside a node it should advance
 every step.
 
-## 5. Evaluation (CUA)
+## 6. Evaluation (CUA)
 
-### 5.1 Setup
+### 6.1 Setup
 
 | Item | Value |
 |---|---|
@@ -88,7 +125,7 @@ every step.
 | Proxy | Screenshots downscaled to about 1 MPx; three explicit breakpoints (end of system, end of task, last history turn before the screenshot) |
 | Baseline | `81c8ce09` (parent of this change) |
 
-### 5.2 Replay A/B
+### 6.2 Replay A/B
 
 A recorded production CUA graph walk (88 planner steps across 20 nodes, real screenshots) was
 replayed through the proxy:
@@ -116,9 +153,9 @@ replayed through the proxy:
 - A rerun of the same logic with the diagnostic trace enabled reproduced the result (274,117 and
   273,293 tokens; 1,553 and 1,541 per step).
 - Node first steps (58,646 tokens per walk) and cold misses (108,345) are identical in all builds.
-  They are caused by the client (see §6), not by retention.
+  They are caused by the client (see §7), not by retention.
 
-### 5.3 Production comparison
+### 6.3 Production comparison
 
 Two serving nodes took the same CUA traffic through the same proxy during overlapping windows:
 - one ran `5bce700` (this change plus the recap rule);
@@ -143,7 +180,7 @@ These comparisons were not strictly controlled:
 - The patched node started with an empty cache, which explains most of its no-hit requests in the
   first ten minutes.
 
-## 6. Limits and open items
+## 7. Limits and open items
 
 - **Node first steps and cold misses.** They need client changes, not retention changes:
   - **Tools are rendered before the system text,** so a node whose tool schema differs (for example
@@ -160,7 +197,7 @@ These comparisons were not strictly controlled:
 - **The replay A/B measured `a3759c4`.** `5bce700` only adds the recap rule and is covered by
   `test_lineage_keeps_a_shallower_recap_point_for_the_next_task`.
 
-## 7. Reproduction
+## 8. Reproduction
 
 - **Unit tests:** `test_resource_manager.cpp` depends only on headers, so it can be built without
   CUDA:
@@ -172,7 +209,7 @@ These comparisons were not strictly controlled:
   ./test_resource_manager
   ```
 
-- **Replay traces:** the traces used in §5.2 contain customer data and are not published. The method
+- **Replay traces:** the traces used in §6.2 contain customer data and are not published. The method
   needs only a recorded sequence of chat-completion bodies with their screenshots. Replay them in
   order, set each request's generation length to the recorded one, and read `timings.cache_n` per
   request.
