@@ -350,6 +350,18 @@ Host 先释放安全的重复副本，再对有限物理动作作完整预检：
 被本次申请替换，才执行删除。Shared 引用的名义大小不重复累加。预检后 allocator 仍须满足
 完整 StateImage 与连续 extent geometry；分配失败可放弃保存，已完成删除不回滚。
 
+<a id="lineage"></a>
+### 7.4 Request-chain retention (CUA)
+
+A computer-use agent (CUA) loop resumes every step from the previous step's history point exactly
+once. Under the general rules above those adopted-once points stay reuse-tier, and the fresh chain
+head is the cheapest victim for one-off requests, so once Host is full each step falls back to an
+older point. `--lineage-checkpoints N` (default 4, `0` disables it) tracks public points as request
+chains: the chain head inherits the demand of the point it extends; superseded points are demoted
+and bounded to the newest N per chain; dead points of earlier steps and their private endpoints are
+retired once the chain resumes past them. Rules, metrics and the CUA evaluation are in
+[Request-chain retention for CUA workloads](cua-lineage-retention.md).
+
 <a id="scheduling"></a>
 ## 8. 调度、抢占与恢复
 
@@ -455,6 +467,7 @@ Sequence、checkpoint 和 pending handle 的 owner/generation 检查防止迟到
 | Host 为零且 Device state 极少 | 可选输入点/共享保存可能失败；必要执行回收空间，Replay 在完整恢复许可下推进 |
 | 长请求暂停，另有更老 resident | 长请求局部等待；能装入余量的短请求继续进入，更老 resident 结束后按原票号恢复 |
 | 未保留的同一候选被多个请求重新计算 | 新提交观察形成重复需求证据，后续保存可进入复用段，缓存命中统计仍只计实际复用 |
+| CUA loop replaces its screenshot turn every step and resumes from the previous history point | The chain head inherits demand and wins admission; superseded points are demoted and bounded per chain; the previous step's screenshot point and private endpoint are retired ([7.4](#lineage)) |
 
 <a id="observability"></a>
 ## 11. 观测与性能边界

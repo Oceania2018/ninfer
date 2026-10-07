@@ -907,6 +907,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--no-prefix-reuse` | disable compatible-prefix caching | prefix reuse on |
 | `--device-state-slots N` | extra Device StateImages beyond `max-concurrency` | `max-concurrency` |
 | `--host-context-mib N` | shared pinned Host budget for StateImages, KV and pause snapshots, including in-flight destinations | `8192 MiB + 8 native StateImages` |
+| `--lineage-checkpoints N` | superseded prefix points kept per request chain before older ones are retired; `0` disables chain bounding ([request-chain retention](maintainer/cua-lineage-retention.md)) | `4` |
 | `--no-thinking` | disable thinking by default | thinking on |
 | `--preserve-thinking` | preserve closed-turn assistant reasoning by default | off |
 | `--cors` | permissive browser CORS headers | off |
@@ -974,6 +975,8 @@ curl http://127.0.0.1:8080/metrics
 | `ninfer_{preemptions,snapshot_restores,replay_restores}_total` | Pressure pauses and recovery routes |
 | `ninfer_device_kv_{used,capacity}_pages`, `ninfer_device_state_{used,capacity}_slots` | Physical Main KV and StateImage occupancy; retained history also occupies these pools |
 | `ninfer_host_context_{used,reserved,capacity,peak}_bytes` | Unified Host backing; reserved bytes are already included in used bytes |
+| `ninfer_captures_skipped_total` | Optional checkpoint captures dropped because no admissible space could be reclaimed |
+| `ninfer_lineage_retired_{public,private}_total`, `ninfer_lineage_boosted_capture_admissions_total` | Request-chain bounding (`--lineage-checkpoints`): retired superseded or dead chain points, and capture admissions that inherited the extended point's demand |
 | `ninfer_context_transfer_bytes_total{resource,direction}` | Actual State/Main KV/backend KV payload transfers |
 | `ninfer_host_work_seconds_total{phase}`, `ninfer_device_wait_seconds_total` | Instrumented worker wall time; device wait is not CUDA kernel time |
 | `ninfer_constraint_requests_total{outcome}`, `ninfer_constraint_cache_total{result}` | Settled constrained requests by completion state and compilation-cache access |
