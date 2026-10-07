@@ -1968,6 +1968,34 @@ void test_lineage_head_survives_one_off_captures() {
             "a one-off capture evicted the head the next step resumes from");
 }
 
+void test_lineage_keeps_a_shallower_recap_point_for_the_next_task() {
+    Fixture f(0, 4);
+    const auto system = f.program.add(tokens(100));
+    f.publish(system);
+    // Task A opens with the session recap (tokens 101-120) ahead of its own goal.
+    const Base first{.tokens = concat(tokens(150), tokens(20, 100100))};
+    const auto first_owner = f.begin(first, system);
+    const auto recap       = f.program.add(tokens(120));
+    const auto goal        = f.program.add(tokens(150));
+    f.cache.publish(f.program, first_owner, recap);
+    f.cache.publish(f.program, first_owner, goal);
+    f.cache.finish(f.program, first_owner, first, f.next_order);
+    // Its next step resumes from the goal; the recap is shallower than that and must stay.
+    const auto step = loop_step(f, goal, 160, 2);
+    require(f.program.valid_checkpoint(recap),
+            "a shallower recap point was retired as a dead sibling of the task's own steps");
+    // Task B repeats the recap, adds a leg, then has a different goal: it resumes from the
+    // recap, and task A's leftover head (deeper, never resumed from) goes.
+    const Base second{.tokens = concat(tokens(130), tokens(40, 300000))};
+    const auto choice = f.cache.candidates(f.program, second).front();
+    require(choice.source.checkpoint == recap, "the next task did not resume from the recap");
+    const auto second_owner = f.begin(second, recap);
+    const auto next_recap   = f.program.add(tokens(130));
+    f.cache.publish(f.program, second_owner, next_recap);
+    require(!f.program.valid_checkpoint(step.history) && f.program.valid_checkpoint(next_recap),
+            "the previous task's head survived, or the new recap point was lost");
+}
+
 void test_lineage_point_adopted_twice_is_a_branch_and_kept() {
     Fixture f(0, 1);
     const auto system = f.program.add(tokens(100));
@@ -2028,6 +2056,7 @@ int main() {
     try {
         test_lineage_keeps_only_the_newest_superseded_history_points();
         test_lineage_head_survives_one_off_captures();
+        test_lineage_keeps_a_shallower_recap_point_for_the_next_task();
         test_lineage_point_adopted_twice_is_a_branch_and_kept();
         test_lineage_bound_disabled_keeps_previous_behavior();
         test_lineage_capture_inherits_the_extended_points_demand();

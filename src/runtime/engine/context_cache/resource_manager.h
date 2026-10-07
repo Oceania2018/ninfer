@@ -384,7 +384,8 @@ public:
                             entry.priority = adopted->priority;
                         }
                         // `entry` may move below; it is not used again.
-                        retire_dead_siblings(program, owner->lineage, token);
+                        retire_dead_siblings(program, owner->lineage, token,
+                                             owner->adopted_frontier);
                         supersede(program, owner->adopted_shared, owner->lineage);
                     }
                 }
@@ -988,16 +989,22 @@ private:
         }
     }
 
-    // A later step of the chain has published, so points an earlier step published that nobody
-    // resumed from (the end of its screenshot turn) are dead: the chain moved on without them.
-    // Without this they would keep the head priority they inherited for good.
-    void retire_dead_siblings(Program& program, std::uint64_t lineage, OwnerToken publisher) {
+    // A later step of the chain has published, so points an earlier step published deeper than
+    // where this request resumed, and that nobody resumed from (the end of its screenshot turn),
+    // are dead: source selection takes the deepest matching point, so a deeper one this request
+    // passed over does not match the chain any more. A shallower one (a session recap ahead of
+    // the task) can still serve the next task and is kept. Without this the dead points would
+    // keep the head priority they inherited for good.
+    void retire_dead_siblings(Program& program, std::uint64_t lineage, OwnerToken publisher,
+                              std::uint32_t resumed_at) {
         std::vector<std::uint64_t> dead;
         for (const auto& entry : shared_) {
-            if (entry.lineage == lineage && entry.publisher != publisher && !entry.adoptions &&
-                !entry.superseded) {
-                dead.push_back(entry.ordinal);
+            if (entry.lineage != lineage || entry.publisher == publisher || entry.adoptions ||
+                entry.superseded || !program.valid_checkpoint(entry.handle) ||
+                program.checkpoint_metadata(entry.handle).frontier <= resumed_at) {
+                continue;
             }
+            dead.push_back(entry.ordinal);
         }
         for (const auto ordinal : dead) {
             if (const auto* entry = find_shared(ordinal)) { (void)retire_shared(program, *entry); }
