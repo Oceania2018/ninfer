@@ -161,7 +161,7 @@ std::string serve_usage_text(const char* argv0) {
            "(default 4, 0 disables)\n"
            "       --ctx-checkpoint-boundaries turns checkpoints the first message, the first "
            "user turn and the last history turn of OpenAI requests that mark no boundary "
-           "(agent loops; default off)\n"
+           "(agent loops; default); off keeps one automatic point at the end of the prompt\n"
            "       --default-thinking-budget caps model-origin thinking for enabled requests; "
            "control tokens count toward the request output limit\n"
            "       --preserve-thinking retains closed-turn assistant reasoning in later prompts\n"

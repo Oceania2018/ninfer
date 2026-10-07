@@ -54,8 +54,9 @@ Without markers, an OpenAI request saves one automatic point at the end of its f
 loop that is the screenshot turn the next step replaces, so the next step can only resume from the
 shared system prefix, if at all.
 
-`--ctx-checkpoint-boundaries turns` (default `off`) applies to Chat Completions and Responses
-requests that mark no boundary anywhere (tools or messages):
+`--ctx-checkpoint-boundaries turns` is the default; `off` keeps the single automatic point. It
+applies to Chat Completions and Responses requests that mark no boundary anywhere (tools or
+messages):
 
 | Point | Position |
 |---|---|

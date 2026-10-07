@@ -47,7 +47,7 @@ struct ServeOptions {
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     ContextCacheOptions context_cache;
-    CtxCheckpointBoundaries ctx_checkpoint_boundaries = CtxCheckpointBoundaries::Off;
+    CtxCheckpointBoundaries ctx_checkpoint_boundaries = CtxCheckpointBoundaries::Turns;
     bool enable_vision      = false;
     bool use_cuda_graph     = true;
     bool allow_prefix_reuse = true;

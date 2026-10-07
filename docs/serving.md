@@ -908,7 +908,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--device-state-slots N` | extra Device StateImages beyond `max-concurrency` | `max-concurrency` |
 | `--host-context-mib N` | shared pinned Host budget for StateImages, KV and pause snapshots, including in-flight destinations | `8192 MiB + 8 native StateImages` |
 | `--ctx-checkpoints N` | superseded prefix points kept per request chain before older ones are retired; `0` disables chain bounding ([CUA context checkpoints](maintainer/cua-context-checkpoints.md)) | `4` |
-| `--ctx-checkpoint-boundaries off\|turns` | where OpenAI requests that mark no `prompt_cache_breakpoint` get checkpoints: `off` keeps the protocol's single automatic point at the end of the prompt; `turns` (agent loops) places them at the end of the first message, the first user turn and the last history turn before the final one, and drops the automatic point once a history point is placed ([CUA context checkpoints](maintainer/cua-context-checkpoints.md#boundaries)) | `off` |
+| `--ctx-checkpoint-boundaries off\|turns` | where OpenAI requests that mark no `prompt_cache_breakpoint` get checkpoints: `off` keeps the protocol's single automatic point at the end of the prompt; `turns` (agent loops) places them at the end of the first message, the first user turn and the last history turn before the final one, and drops the automatic point once a history point is placed ([CUA context checkpoints](maintainer/cua-context-checkpoints.md#boundaries)) | `turns` |
 | `--no-thinking` | disable thinking by default | thinking on |
 | `--preserve-thinking` | preserve closed-turn assistant reasoning by default | off |
 | `--cors` | permissive browser CORS headers | off |
