@@ -613,11 +613,11 @@ void add_budget(PreprocessStats& stats, const VisionItem& item) {
 }
 
 void enforce_media_item_resource_limits(const PreprocessStats& stats) {
-    if (stats.raw_patches > kMaximumVisionItemRawPatches) {
+    if (stats.raw_patches > maximum_vision_item_raw_patches()) {
         throw ProcessorError(ProcessorErrorKind::BudgetExceeded,
                              "single media item raw patches exceed Vision execution capacity");
     }
-    if (stats.vision_tokens > kMaximumVisionItemTokens) {
+    if (stats.vision_tokens > maximum_vision_item_tokens()) {
         throw ProcessorError(ProcessorErrorKind::BudgetExceeded,
                              "single media item tokens exceed Vision execution capacity");
     }

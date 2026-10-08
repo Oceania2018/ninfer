@@ -129,7 +129,7 @@ int main() {
     namespace qwen       = ninfer::models::qwen3_5;
     const char* artifact = std::getenv("NINFER_TEST_ARTIFACT");
     if (!artifact || !*artifact) { return 77; }
-    static_assert(ninfer::models::qwen3_5::kMaximumVisionItemTokens == 16384);
+    static_assert(ninfer::models::qwen3_5::kDefaultMaximumVisionItemTokens == 16384);
     // The current Vision route fits below 827 MiB, including arena alignment and empty-scratch
     // backing. The context growth check below protects the single-item lifetime bound.
     constexpr std::size_t kWorkspaceCeiling = 827ULL << 20;

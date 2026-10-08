@@ -5,7 +5,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
+#include <stdexcept>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -24,9 +26,29 @@ inline constexpr std::uint64_t kRawPatchesPerVisionToken  = 4;
 inline constexpr std::uint64_t kMaximumPromptVisionTokens = 32'768;
 inline constexpr std::uint64_t kMaximumPromptVisionRawPatches =
     kMaximumPromptVisionTokens * kRawPatchesPerVisionToken;
-inline constexpr std::uint64_t kMaximumVisionItemTokens = 16'384;
-inline constexpr std::uint64_t kMaximumVisionItemRawPatches =
-    kMaximumVisionItemTokens * kRawPatchesPerVisionToken;
+inline constexpr std::uint64_t kDefaultMaximumVisionItemTokens = 16'384;
+
+// Largest single media item the Vision tower is sized for. Startup reserves Vision workspace
+// for this many merged tokens, so lowering it with NINFER_MAX_VISION_ITEM_TOKENS frees device
+// memory on smaller GPUs; items above the limit are rejected with BudgetExceeded.
+inline std::uint64_t maximum_vision_item_tokens() {
+    static const std::uint64_t value = [] {
+        const char* env = std::getenv("NINFER_MAX_VISION_ITEM_TOKENS");
+        if (env == nullptr || *env == '\0') { return kDefaultMaximumVisionItemTokens; }
+        char* end                    = nullptr;
+        const unsigned long long raw = std::strtoull(env, &end, 10);
+        if (end == env || *end != '\0' || raw == 0 || raw > kDefaultMaximumVisionItemTokens) {
+            throw std::invalid_argument(
+                "NINFER_MAX_VISION_ITEM_TOKENS must be an integer in [1, 16384]");
+        }
+        return static_cast<std::uint64_t>(raw);
+    }();
+    return value;
+}
+
+inline std::uint64_t maximum_vision_item_raw_patches() {
+    return maximum_vision_item_tokens() * kRawPatchesPerVisionToken;
+}
 
 struct PreparedMediaPayload {
     // Exact row-major BF16 input consumed by the Vision patch projection.
