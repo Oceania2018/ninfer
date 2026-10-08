@@ -13,9 +13,12 @@
 namespace ninfer::ops::detail {
 namespace {
 
+constexpr std::int32_t kSmallTMaxTokens = 16;
+
 enum class Nvfp4LinearSwiGluRoute {
     DecodeFusedA16,
     SmallTFusedA16,
+    ChunkedSmallTA16,
     FusedA4,
     TmaFusedA4,
 };
@@ -27,8 +30,11 @@ Nvfp4LinearSwiGluRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
     }
     if (policy == LinearPolicy::A16Only || policy == LinearPolicy::AllowA8) {
         if (tokens == 1) { return Nvfp4LinearSwiGluRoute::DecodeFusedA16; }
-        if (tokens <= 16) { return Nvfp4LinearSwiGluRoute::SmallTFusedA16; }
-        throw std::invalid_argument("nvfp4 linear_swiglu A16 is registered only through T=16");
+        if (tokens <= kSmallTMaxTokens) { return Nvfp4LinearSwiGluRoute::SmallTFusedA16; }
+        // A16 has no native kernel above T=16. A16-only weights (e.g. a draft MLP re-encoded
+        // without an activation divisor) still see T = concurrency x draft block, so reuse the
+        // small-T kernel per 16-token chunk; each chunk re-reads the weight.
+        return Nvfp4LinearSwiGluRoute::ChunkedSmallTA16;
     }
     if (tokens == 1) { return Nvfp4LinearSwiGluRoute::DecodeFusedA16; }
     if (tokens <= 4) { return Nvfp4LinearSwiGluRoute::SmallTFusedA16; }
@@ -75,6 +81,18 @@ void nvfp4_linear_swiglu_dispatch(const Tensor& x, const Weight& weight, Tensor&
         return;
     case Nvfp4LinearSwiGluRoute::SmallTFusedA16:
         nvfp4_linear_swiglu_small_t_launch(x, weight, out, stream);
+        return;
+    case Nvfp4LinearSwiGluRoute::ChunkedSmallTA16:
+        for (std::int32_t start = 0; start < x.ne[1]; start += kSmallTMaxTokens) {
+            const std::int32_t len = std::min(kSmallTMaxTokens, x.ne[1] - start);
+            const Tensor x_chunk   = x.slice(1, start, len);
+            Tensor out_chunk       = out.slice(1, start, len);
+            if (len == 1) {
+                nvfp4_linear_swiglu_decode_launch(x_chunk, weight, out_chunk, stream);
+            } else {
+                nvfp4_linear_swiglu_small_t_launch(x_chunk, weight, out_chunk, stream);
+            }
+        }
         return;
     case Nvfp4LinearSwiGluRoute::FusedA4:
         nvfp4_linear_swiglu_a4_launch(x, weight, out, workspace, stream);
