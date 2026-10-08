@@ -42,12 +42,32 @@ struct MaterializationStats {
     std::uint64_t read_bytes = 0; // Actual payload reads, including direct-I/O alignment.
     std::uint64_t h2d_bytes  = 0;
     std::uint64_t device_capacity_bytes = 0;
+    std::uint64_t host_mapped_bytes     = 0; // Device weights served from mapped Host memory.
     std::uint64_t retained_host_bytes   = 0;
     std::uint64_t owned_value_bytes     = 0;
     std::uint64_t peak_staging_bytes    = 0;
     std::size_t device_object_count     = 0;
     std::size_t host_object_count       = 0;
     double upload_seconds               = 0;
+};
+
+// Page-locked Host memory mapped into the device address space. Kernels read it over PCIe, so it
+// only suits weights that are row-gathered rather than streamed every step (the token embedding).
+class MappedHostWeight {
+public:
+    explicit MappedHostWeight(std::size_t bytes);
+    ~MappedHostWeight();
+    MappedHostWeight(const MappedHostWeight&)            = delete;
+    MappedHostWeight& operator=(const MappedHostWeight&) = delete;
+
+    [[nodiscard]] std::byte* host() const noexcept { return host_; }
+    [[nodiscard]] const std::byte* device() const noexcept { return device_; }
+    [[nodiscard]] std::size_t bytes() const noexcept { return bytes_; }
+
+private:
+    std::byte* host_         = nullptr;
+    const std::byte* device_ = nullptr;
+    std::size_t bytes_       = 0;
 };
 
 class MaterializedArtifact {
@@ -77,6 +97,7 @@ private:
     };
 
     std::unique_ptr<DeviceArena> arena_;
+    std::vector<std::unique_ptr<MappedHostWeight>> mapped_;
     std::vector<ObjectStorage> objects_;
     MaterializationStats stats_;
 };

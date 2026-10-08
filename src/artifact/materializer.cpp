@@ -11,8 +11,11 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
+#include <set>
 #include <string>
+#include <string_view>
 #include <tuple>
 
 namespace ninfer::artifact {
@@ -100,7 +103,75 @@ float read_divisor(const Reader& reader, ObjectHandle handle, const WeightGeomet
     return value;
 }
 
+// Objects named by NINFER_HOST_MAPPED_WEIGHTS (comma-separated binding names, e.g.
+// "text/token_embedding"). Each binding must cover one whole object.
+std::set<std::size_t> host_mapped_objects(const Reader& reader) {
+    std::set<std::size_t> out;
+    const char* env = std::getenv("NINFER_HOST_MAPPED_WEIGHTS");
+    if (env == nullptr) { return out; }
+    std::string_view rest(env);
+    while (!rest.empty()) {
+        const auto comma = rest.find(',');
+        const auto name  = rest.substr(0, comma);
+        rest             = comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
+        if (name.empty()) { continue; }
+        const auto& bindings = reader.directory().bindings;
+        const auto found     = bindings.find(name);
+        if (found == bindings.end()) {
+            throw ArtifactError("NINFER_HOST_MAPPED_WEIGHTS: unknown binding " + std::string(name));
+        }
+        if (!found->second.whole_object || found->second.parts.size() != 1) {
+            throw ArtifactError("NINFER_HOST_MAPPED_WEIGHTS: " + std::string(name) +
+                                " does not bind a whole object");
+        }
+        out.insert(found->second.parts.front().object.index);
+    }
+    return out;
+}
+
+// Moves the selected placements out of the device arena and re-packs the remaining offsets the
+// same way Binder::finish() assigns them.
+std::vector<DevicePlacement> split_host_mapped(MaterializationPlan& plan,
+                                               const std::set<std::size_t>& mapped) {
+    std::vector<DevicePlacement> moved;
+    if (mapped.empty()) { return moved; }
+    std::vector<DevicePlacement> kept;
+    std::uint64_t cursor = 0;
+    for (auto placement : plan.device_objects) {
+        if (mapped.contains(placement.object.index)) {
+            moved.push_back(placement);
+            continue;
+        }
+        placement.offset = align_up(cursor, placement.alignment, "device offset");
+        cursor           = checked_add(placement.offset, placement.bytes, "device capacity");
+        kept.push_back(placement);
+    }
+    plan.device_objects        = std::move(kept);
+    plan.device_capacity_bytes = cursor;
+    return moved;
+}
+
 } // namespace
+
+MappedHostWeight::MappedHostWeight(std::size_t bytes) : bytes_(bytes) {
+    if (bytes == 0) { throw ArtifactError("mapped Host weight must be nonzero"); }
+    void* host = nullptr;
+    // Write-combined: the CPU only fills it once; the GPU reads it over PCIe.
+    check_cuda(cudaHostAlloc(&host, bytes, cudaHostAllocMapped | cudaHostAllocWriteCombined),
+               "allocate mapped Host weight");
+    host_       = static_cast<std::byte*>(host);
+    void* device = nullptr;
+    const auto status = cudaHostGetDevicePointer(&device, host, 0);
+    if (status != cudaSuccess) {
+        (void)cudaFreeHost(host);
+        check_cuda(status, "map Host weight into the device address space");
+    }
+    device_ = static_cast<const std::byte*>(device);
+}
+
+MappedHostWeight::~MappedHostWeight() {
+    if (host_) { (void)cudaFreeHost(host_); }
+}
 
 const WeightParent& MaterializedArtifact::device_parent(ObjectHandle handle) const {
     if (!has_device(handle)) { throw ArtifactError("object has no device weight backing"); }
@@ -132,6 +203,7 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
     }
     const StartupObserver no_observer;
     const auto& observer = startup_observer ? *startup_observer : no_observer;
+    const auto mapped_placements = split_host_mapped(plan, host_mapped_objects(reader));
     std::uint64_t total  = 0;
     for (const auto& placement : plan.device_objects) {
         total = checked_add(total, placement.bytes, "device payload bytes");
@@ -175,6 +247,27 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
                 read_divisor(reader, placement.object, geometry, storage.host_data, out.stats_);
             storage.host = WeightParent{geometry, storage.host_data.data(), divisor};
         }
+    }
+    for (const auto& placement : mapped_placements) {
+        const auto& geometry = reader.geometry(placement.object);
+        auto& object         = out.objects_.at(placement.object.index);
+        if (object.device || geometry.bytes != placement.bytes) {
+            throw ArtifactError("invalid or duplicate mapped Host placement");
+        }
+        auto buffer =
+            std::make_unique<MappedHostWeight>(static_cast<std::size_t>(placement.bytes));
+        const auto& descriptor = reader.directory().tensor(placement.object);
+        reader.read_into(descriptor.offset, {buffer->host(), buffer->bytes()});
+        out.stats_.read_bytes =
+            checked_add(out.stats_.read_bytes, placement.bytes, "mapped Host read bytes");
+        out.stats_.host_mapped_bytes =
+            checked_add(out.stats_.host_mapped_bytes, placement.bytes, "mapped Host bytes");
+        const auto divisor =
+            object.host ? object.host->weight_scale_divisor
+                        : read_divisor(reader, placement.object, geometry,
+                                       {buffer->host(), buffer->bytes()}, out.stats_);
+        object.device = WeightParent{geometry, buffer->device(), divisor};
+        out.mapped_.push_back(std::move(buffer));
     }
     std::vector<CopyRange> ranges;
     for (const auto& placement : plan.device_objects) {
