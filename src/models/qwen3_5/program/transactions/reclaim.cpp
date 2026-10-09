@@ -8,6 +8,7 @@
 #include <limits>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace ninfer::models::qwen3_5::detail {
 namespace {
@@ -623,10 +624,12 @@ struct ReleasePlan {
 template <typename Prefix>
 std::uint64_t recovery_loss(const ProgramImpl& program, std::span<const CheckpointHandle> removed,
                             std::span<const CheckpointHandle> surviving, Prefix&& prefix) {
+    // Live handles are unique per slot index, so index sets give the same membership as handle
+    // comparison once stale handles are filtered.
     std::vector<CheckpointHandle> ordered;
+    std::unordered_set<std::uint32_t> removed_indices;
     for (const auto handle : removed) {
-        if (program.valid_checkpoint(handle) &&
-            std::find(ordered.begin(), ordered.end(), handle) == ordered.end()) {
+        if (program.valid_checkpoint(handle) && removed_indices.insert(handle.index).second) {
             ordered.push_back(handle);
         }
     }
@@ -634,6 +637,22 @@ std::uint64_t recovery_loss(const ProgramImpl& program, std::span<const Checkpoi
         const auto l = program.checkpoint(left).frontier, r = program.checkpoint(right).frontier;
         return l != r ? l > r : left.index < right.index;
     });
+
+    // Fallback candidates are the same for every removed point: live survivors that are not
+    // themselves removed. Only the deepest prefix match matters, so an unsorted scan that
+    // tests a candidate only when it would deepen the current fallback is enough.
+    struct Fallback {
+        std::uint32_t frontier;
+        CheckpointHandle handle;
+    };
+    std::vector<Fallback> fallbacks;
+    fallbacks.reserve(surviving.size());
+    for (const auto retained : surviving) {
+        if (program.valid_checkpoint(retained) && !removed_indices.contains(retained.index)) {
+            const auto frontier = program.checkpoint(retained).frontier;
+            if (frontier > 0) { fallbacks.push_back({frontier, retained}); }
+        }
+    }
 
     struct LineageLoss {
         CheckpointHandle deepest;
@@ -644,15 +663,12 @@ std::uint64_t recovery_loss(const ProgramImpl& program, std::span<const Checkpoi
     for (const auto handle : ordered) {
         const auto& record     = program.checkpoint(handle);
         std::uint32_t fallback = 0;
-        for (const auto retained : surviving) {
-            if (!program.valid_checkpoint(retained) ||
-                std::find(ordered.begin(), ordered.end(), retained) != ordered.end()) {
+        for (const auto& candidate : fallbacks) {
+            // A point deeper than the removed one cannot be its prefix.
+            if (candidate.frontier <= fallback || candidate.frontier > record.frontier) {
                 continue;
             }
-            const auto& candidate = program.checkpoint(retained);
-            if (candidate.frontier > fallback && prefix(retained, handle)) {
-                fallback = candidate.frontier;
-            }
+            if (prefix(candidate.handle, handle)) { fallback = candidate.frontier; }
         }
         const auto lost    = record.frontier - fallback;
         const auto lineage = std::find_if(lineages.begin(), lineages.end(), [&](const auto& item) {

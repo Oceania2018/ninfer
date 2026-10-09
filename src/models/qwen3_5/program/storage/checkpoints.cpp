@@ -279,8 +279,15 @@ std::size_t ProgramImpl::host_bytes_released(std::span<const CheckpointHandle> h
         std::uint32_t references = 0;
     };
 
+    struct HistoryOwners {
+        std::uint32_t owners           = 0;
+        long references                = 0;
+        std::uint32_t retained_main    = 0;
+        std::uint32_t retained_backend = 0;
+    };
+
     std::unordered_set<std::uint32_t> records;
-    std::unordered_map<const KVHistory*, std::uint32_t> histories;
+    std::unordered_map<const KVHistory*, HistoryOwners> histories;
     std::unordered_map<std::uint32_t, StateReferences> states;
     std::unordered_map<std::uint32_t, PageReferences> main, backend;
     const auto collect = [](const KVAddressSpaceStore& addresses, const LogicalKVPageStore& pages,
@@ -301,28 +308,31 @@ std::size_t ProgramImpl::host_bytes_released(std::span<const CheckpointHandle> h
         auto& state        = states[state_store->descriptor_index(record.state)];
         state.state        = record.state;
         ++state.references;
-        ++histories[record.kv.get()];
+        histories.try_emplace(record.kv.get());
     }
-    for (const auto& [history, selected] : histories) {
-        std::uint32_t owners = 0, retained_main = 0, retained_backend = 0;
-        long references = 0;
-        for (std::uint32_t index = 0; index < checkpoints.size(); ++index) {
-            const auto& slot = checkpoints[index];
-            if (!slot.value || slot.value->kv.get() != history) { continue; }
-            ++owners;
-            references = slot.value->kv.use_count();
-            if (!records.contains(index)) {
-                retained_main    = std::max(retained_main, slot.value->frontier);
-                retained_backend = std::max(retained_backend, slot.value->backend_frontier);
-            }
+    // One pass over all checkpoints attributes every owner to its selected history; a scan per
+    // history made each query O(selected histories x checkpoints) on large Host caches.
+    for (std::uint32_t index = 0; index < checkpoints.size(); ++index) {
+        const auto& slot = checkpoints[index];
+        if (!slot.value) { continue; }
+        const auto found = histories.find(slot.value->kv.get());
+        if (found == histories.end()) { continue; }
+        HistoryOwners& owners = found->second;
+        ++owners.owners;
+        owners.references = slot.value->kv.use_count();
+        if (!records.contains(index)) {
+            owners.retained_main    = std::max(owners.retained_main, slot.value->frontier);
+            owners.retained_backend = std::max(owners.retained_backend, slot.value->backend_frontier);
         }
+    }
+    for (const auto& [history, owners] : histories) {
         // Active sequences and in-flight history holders keep their directories independently
         // of optional points. Otherwise deletion also trims the unneeded inactive suffix.
-        if (references != owners) { continue; }
-        collect(*text_kv_addresses, *text_kv_pages, history->text, retained_main, main);
+        if (owners.references != owners.owners) { continue; }
+        collect(*text_kv_addresses, *text_kv_pages, history->text, owners.retained_main, main);
         if (history->backend) {
-            collect(*backend_kv_addresses, *backend_kv_pages, *history->backend, retained_backend,
-                    backend);
+            collect(*backend_kv_addresses, *backend_kv_pages, *history->backend,
+                    owners.retained_backend, backend);
         }
     }
     std::size_t bytes = 0;
