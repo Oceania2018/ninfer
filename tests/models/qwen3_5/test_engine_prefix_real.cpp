@@ -57,8 +57,9 @@ ninfer::EngineOptions anthropic_prefix_regression_engine_options(const char* art
     options.max_concurrency                  = 1;
     options.max_pending_requests             = 1;
     options.context_cache.device_state_slots = 1;
-    // This 27B workload has a fixed Host budget for four StateImages and 512 MiB of KV;
-    // all contents compete within the same backing allocation.
+    // This 27B workload has a fixed Host budget for four exact FP32 StateImages and 512 MiB of
+    // KV; all contents compete within the same backing allocation.
+    options.context_cache.host_state_storage  = ninfer::HostStateStorage::Fp32;
     options.context_cache.host_capacity_bytes = 4ULL * 153954304 + (512ULL << 20);
     return options;
 }

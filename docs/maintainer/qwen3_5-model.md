@@ -317,6 +317,11 @@ Each StateImage contains the Text GDN state and continuation hidden. Per GDN lay
 state has one `[Dv,Dk]` matrix per value head, and convolution history has
 `(2 * key_width + value_width) * (kernel_width - 1)` values. Program sizes Device/Host StateImage
 capacity under the [context resource contract](resource-scheduling-and-context-cache.md#capacity).
+Device recurrent state is FP32. A Host StateImage stores it in `context_cache.host_state_storage`:
+FP32 copies it exactly, BF16 rounds it with `cast_fp32_to_bf16`, and NVFP4 encodes each value
+head as one `encode_nvfp4_slices` slice. Restore inverts the encoding into FP32 through one
+staged layer on the transfer stream; conv, continuation hidden and DFlash state are always copied
+exactly.
 ReplaySSM records are separate pending-round scratch when speculation is enabled.
 
 Text GQA KV grows with visible context. Selected MTP owns separate KV; DFlash backends own the

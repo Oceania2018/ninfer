@@ -127,6 +127,18 @@ const char* kv_cache_name(ninfer::KvCacheStorage storage) noexcept {
     return "unknown";
 }
 
+const char* host_state_name(ninfer::HostStateStorage storage) noexcept {
+    switch (storage) {
+    case ninfer::HostStateStorage::Fp32:
+        return "fp32";
+    case ninfer::HostStateStorage::BFloat16:
+        return "bf16";
+    case ninfer::HostStateStorage::Nvfp4Group16:
+        return "nvfp4";
+    }
+    return "unknown";
+}
+
 const char* kv_capacity_mode_name(ninfer::KvCapacityMode mode) noexcept {
     return mode == ninfer::KvCapacityMode::Automatic ? "auto" : "explicit";
 }
@@ -449,9 +461,10 @@ void OperationalLog::engine_capacity(const GenerationService& service) const {
                   product::format_pretty_bytes(memory.runtime_reservation_bytes),
                   product::format_pretty_bytes(memory.available_after_startup_bytes));
 
-    logger_->info("context | history {} | {} active + {} extra device states | host {}",
+    logger_->info("context | history {} | {} active + {} extra device states | host {}, state {}",
                   cache.enabled ? "on" : "off", engine.max_concurrency, *cache.device_state_slots,
-                  product::format_pretty_bytes(*cache.host_capacity_bytes));
+                  product::format_pretty_bytes(*cache.host_capacity_bytes),
+                  host_state_name(cache.host_state_storage));
 
     if (service.options().enable_vision) {
         const ninfer::MediaCacheSummary media = service.media_cache_summary();

@@ -21,6 +21,7 @@ set(ninfer_op_tests
   sampling
   scalar
   cast
+  nvfp4_slice_codec
   prepare_ragged_prefix
   scatter
   scatter_bf16_batch

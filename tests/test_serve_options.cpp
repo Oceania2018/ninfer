@@ -80,6 +80,25 @@ int main() {
                           kv_help.find("k8v4") != std::string::npos,
                       "serve help omits a production KV storage mode");
 
+    failures += check(defaults.context_cache.host_state_storage == ninfer::HostStateStorage::BFloat16,
+                      "Host StateImage recurrent state does not default to BF16");
+    const ServeOptions host_fp32 =
+        parse({"ninfer-serve", "model.ninfer", "--host-state-dtype", "fp32"});
+    failures += check(host_fp32.context_cache.host_state_storage == ninfer::HostStateStorage::Fp32,
+                      "--host-state-dtype fp32 did not select exact Host state");
+    const ServeOptions host_nvfp4 =
+        parse({"ninfer-serve", "model.ninfer", "--host-state-dtype", "nvfp4"});
+    failures += check(host_nvfp4.context_cache.host_state_storage ==
+                          ninfer::HostStateStorage::Nvfp4Group16,
+                      "--host-state-dtype nvfp4 did not select group-16 NVFP4 Host state");
+    bool unknown_host_state_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--host-state-dtype", "fp16"});
+    } catch (const std::invalid_argument&) { unknown_host_state_rejected = true; }
+    failures += check(unknown_host_state_rejected, "--host-state-dtype accepted an unknown dtype");
+    failures += check(kv_help.find("--host-state-dtype fp32|bf16|nvfp4") != std::string::npos,
+                      "serve help omits --host-state-dtype");
+
     const ServeOptions model_alias =
         parse({"ninfer-serve", "model.ninfer", "--model-id", "deployment-alias"});
     failures +=

@@ -33,6 +33,15 @@ enum class KvCacheStorage : std::uint8_t {
     Fp8KeyNvfp4Value,
 };
 
+// Encoding of the GDN recurrent state inside a Host StateImage. Device state stays FP32; the
+// encoding is applied on Device-to-Host backup and inverted on Host-to-Device restore.
+enum class HostStateStorage : std::uint8_t {
+    Fp32,
+    BFloat16,
+    // E2M1 codes with one E4M3 scale per 16 contiguous values and one FP32 scale per value head.
+    Nvfp4Group16,
+};
+
 enum class EnginePurpose : std::uint8_t {
     Generation,
     CausalScoring,
@@ -137,6 +146,9 @@ struct ContextCacheOptions {
     // (0 disables chain bounding). A chain is the run of public points each resumed from the
     // previous one exactly once, as an agent loop that replaces its last turn produces.
     std::uint32_t ctx_checkpoints = 4;
+    // Host StateImage encoding of the GDN recurrent state. FP32 is exact; BF16 and NVFP4 round
+    // once per Host backup in exchange for proportionally more Host checkpoints per byte.
+    HostStateStorage host_state_storage = HostStateStorage::BFloat16;
 };
 
 struct ContextCostOptions {

@@ -1,6 +1,8 @@
 #include "models/qwen3_5/state/state_image.h"
 
 #include "core/device.h"
+#include "ninfer/ops/cast.h"
+#include "ninfer/ops/nvfp4_slice_codec.h"
 
 #include <limits>
 #include <stdexcept>
@@ -65,6 +67,64 @@ bool same_optional_region(const std::optional<LayoutRegion>& left,
     return left.has_value() == right.has_value() && (!left || same_region(*left, *right));
 }
 
+bool same_recurrent_encoding(const StateImageRecurrentEncoding& left,
+                             const StateImageRecurrentEncoding& right) noexcept {
+    return left.values_bytes == right.values_bytes &&
+           left.group_scale_offset == right.group_scale_offset &&
+           left.group_scale_bytes == right.group_scale_bytes &&
+           left.slice_scale_offset == right.slice_scale_offset &&
+           left.slice_scale_bytes == right.slice_scale_bytes;
+}
+
+constexpr std::size_t kRecurrentEncodingAlignment = 16;
+
+std::size_t align_up(std::size_t value, std::size_t alignment, const char* label) {
+    return checked_add(value, alignment - 1U, label) & ~(alignment - 1U);
+}
+
+// One layer's recurrent slot in its Host encoding; returns the encoded layer stride.
+std::size_t plan_recurrent_encoding(const LinearAttentionStatePoolSpec& linear,
+                                    HostStateStorage storage, StateImageRecurrentEncoding& out) {
+    const std::size_t head_elements = checked_mul(static_cast<std::size_t>(linear.key_head_dim),
+                                                  static_cast<std::size_t>(linear.value_head_dim),
+                                                  "StateImage recurrent head overflow");
+    const std::size_t elements = checked_mul(head_elements,
+                                             static_cast<std::size_t>(linear.value_heads),
+                                             "StateImage recurrent layer overflow");
+    out = {};
+    switch (storage) {
+    case HostStateStorage::Fp32:
+        out.values_bytes = checked_mul(elements, sizeof(float), "StateImage recurrent overflow");
+        return out.values_bytes;
+    case HostStateStorage::BFloat16:
+        out.values_bytes = checked_mul(elements, 2U, "StateImage recurrent overflow");
+        return align_up(out.values_bytes, kRecurrentEncodingAlignment,
+                        "StateImage recurrent overflow");
+    case HostStateStorage::Nvfp4Group16: {
+        constexpr auto group = static_cast<std::size_t>(ops::kNvfp4SliceGroup);
+        if (head_elements % group != 0) {
+            throw std::invalid_argument(
+                "StateImage NVFP4 host state needs value heads that are multiples of 16 values");
+        }
+        out.values_bytes       = elements / 2U;
+        out.group_scale_offset = align_up(out.values_bytes, kRecurrentEncodingAlignment,
+                                          "StateImage recurrent overflow");
+        out.group_scale_bytes  = elements / group;
+        out.slice_scale_offset =
+            align_up(checked_add(out.group_scale_offset, out.group_scale_bytes,
+                                 "StateImage recurrent overflow"),
+                     kRecurrentEncodingAlignment, "StateImage recurrent overflow");
+        out.slice_scale_bytes =
+            checked_mul(static_cast<std::size_t>(linear.value_heads), sizeof(float),
+                        "StateImage recurrent overflow");
+        return align_up(checked_add(out.slice_scale_offset, out.slice_scale_bytes,
+                                    "StateImage recurrent overflow"),
+                        kRecurrentEncodingAlignment, "StateImage recurrent overflow");
+    }
+    }
+    throw std::invalid_argument("StateImage host recurrent storage is invalid");
+}
+
 bool same_host_layout(const StateImageHostLayout& left,
                       const StateImageHostLayout& right) noexcept {
     return same_linear_spec(left.spec.linear, right.spec.linear) &&
@@ -74,6 +134,8 @@ bool same_host_layout(const StateImageHostLayout& left,
            left.linear_conv_layer_bytes == right.linear_conv_layer_bytes &&
            same_region(left.linear_recurrent, right.linear_recurrent) &&
            left.linear_recurrent_layer_bytes == right.linear_recurrent_layer_bytes &&
+           left.spec.host_recurrent == right.spec.host_recurrent &&
+           same_recurrent_encoding(left.recurrent_encoding, right.recurrent_encoding) &&
            same_region(left.continuation_hidden, right.continuation_hidden) &&
            same_optional_region(left.dflash_local_k, right.dflash_local_k) &&
            same_optional_region(left.dflash_local_v, right.dflash_local_v) &&
@@ -99,15 +161,13 @@ StateImageHostLayout plan_host_state_image(const StateImageSpec& spec) {
     host.spec = spec;
     const Tensor conv_slot(nullptr, spec.linear.conv_dtype,
                            {spec.linear.conv_channels, spec.linear.conv_width});
-    const Tensor recurrent_slot(
-        nullptr, DType::FP32,
-        {spec.linear.key_head_dim, spec.linear.value_head_dim, spec.linear.value_heads});
     const Tensor hidden_slot(nullptr, DType::BF16, {spec.hidden});
     host.linear_conv_layer_bytes = conv_slot.bytes();
     host.linear_conv = builder.add(checked_mul(host.linear_conv_layer_bytes, spec.linear.layers,
                                                "StateImage host convolution bytes overflow"),
                                    kStateImageAlignment, "StateImage host convolution");
-    host.linear_recurrent_layer_bytes = recurrent_slot.bytes();
+    host.linear_recurrent_layer_bytes =
+        plan_recurrent_encoding(spec.linear, spec.host_recurrent, host.recurrent_encoding);
     host.linear_recurrent =
         builder.add(checked_mul(host.linear_recurrent_layer_bytes, spec.linear.layers,
                                 "StateImage host recurrent bytes overflow"),
@@ -164,6 +224,10 @@ StateImageDeviceLayout plan_state_image_device_pool(LayoutBuilder& builder,
     }
 
     out.host = plan_host_state_image(spec);
+    if (spec.host_recurrent != HostStateStorage::Fp32) {
+        out.recurrent_staging = builder.add(out.host.linear_recurrent_layer_bytes,
+                                            kStateImageAlignment, "StateImage recurrent staging");
+    }
     return out;
 }
 
@@ -183,8 +247,10 @@ TransferWork state_image_transfer_work(const StateImageHostLayout& layout) {
             payload, checked_mul(component_bytes, 2U, "StateImage transfer payload overflow"),
             "StateImage transfer payload overflow");
     }
+    // An encoded recurrent layer adds its encode or decode launch to the layer's copy.
     const std::uint64_t operations =
         2ULL * layout.spec.linear.layers + 1ULL +
+        (layout.spec.host_recurrent != HostStateStorage::Fp32 ? layout.spec.linear.layers : 0ULL) +
         (layout.spec.dflash_local ? 2ULL * layout.spec.dflash_local->layers : 0ULL);
     if (operations > std::numeric_limits<std::uint32_t>::max()) {
         throw std::overflow_error("StateImage transfer operation count exceeds uint32");
@@ -296,7 +362,9 @@ StateImageDevicePool::StateImageDevicePool(DeviceSpan backing, const StateImageD
     if (layout.dflash_local.has_value() != host_layout_.spec.dflash_local.has_value()) {
         throw std::invalid_argument("StateImage DFlash layout is inconsistent");
     }
-    StateImageSpec device_spec{.linear = layout.linear.spec, .hidden = continuation_hidden_.ne[0]};
+    StateImageSpec device_spec{.linear         = layout.linear.spec,
+                               .hidden         = continuation_hidden_.ne[0],
+                               .host_recurrent = host_layout_.spec.host_recurrent};
     if (layout.dflash_local) {
         device_spec.dflash_local = DFlashLocalStateSpec{
             .layers   = static_cast<std::uint32_t>(layout.dflash_local->k.size()),
@@ -308,6 +376,12 @@ StateImageDevicePool::StateImageDevicePool(DeviceSpan backing, const StateImageD
     if (!same_host_layout(host_layout_, plan_host_state_image(device_spec))) {
         throw std::invalid_argument("StateImage host layout does not match its device components");
     }
+    const bool encoded = host_layout_.spec.host_recurrent != HostStateStorage::Fp32;
+    if (layout.recurrent_staging.has_value() != encoded ||
+        (encoded && layout.recurrent_staging->bytes < host_layout_.linear_recurrent_layer_bytes)) {
+        throw std::invalid_argument("StateImage recurrent staging does not match its encoding");
+    }
+    if (encoded) { recurrent_staging_ = layout.recurrent_staging->bind(backing); }
     if (layout.dflash_local) {
         if (layout.dflash_local->lane_capacity != linear_.slot_count()) {
             throw std::invalid_argument("StateImage components do not share one slot geometry");
@@ -409,10 +483,15 @@ void StateImageDevicePool::copy_to_host(std::int32_t source, HostStateImageView 
                                               layer * host_layout_.linear_conv_layer_bytes),
             conv.data, conv.bytes(), cudaMemcpyDeviceToHost, stream));
         const Tensor recurrent = linear_.recurrent_slot(layer, source);
-        CUDA_CHECK(cudaMemcpyAsync(
+        std::byte* host_layer =
             byte_offset(destination.data, host_layout_.linear_recurrent.offset +
-                                              layer * host_layout_.linear_recurrent_layer_bytes),
-            recurrent.data, recurrent.bytes(), cudaMemcpyDeviceToHost, stream));
+                                              layer * host_layout_.linear_recurrent_layer_bytes);
+        if (recurrent_staging_.data == nullptr) {
+            CUDA_CHECK(cudaMemcpyAsync(host_layer, recurrent.data, recurrent.bytes(),
+                                       cudaMemcpyDeviceToHost, stream));
+        } else {
+            encode_recurrent_to_host(recurrent, host_layer, stream);
+        }
     }
     const Tensor hidden = continuation_hidden_slot(source);
     CUDA_CHECK(
@@ -447,12 +526,16 @@ void StateImageDevicePool::copy_from_host(HostStateImageConstView source, std::i
             byte_offset(source.data, host_layout_.linear_conv.offset +
                                          layer * host_layout_.linear_conv_layer_bytes),
             conv.bytes(), cudaMemcpyHostToDevice, stream));
-        const Tensor recurrent = linear_.recurrent_slot(layer, destination);
-        CUDA_CHECK(cudaMemcpyAsync(
-            recurrent.data,
+        Tensor recurrent = linear_.recurrent_slot(layer, destination);
+        const std::byte* host_layer =
             byte_offset(source.data, host_layout_.linear_recurrent.offset +
-                                         layer * host_layout_.linear_recurrent_layer_bytes),
-            recurrent.bytes(), cudaMemcpyHostToDevice, stream));
+                                         layer * host_layout_.linear_recurrent_layer_bytes);
+        if (recurrent_staging_.data == nullptr) {
+            CUDA_CHECK(cudaMemcpyAsync(recurrent.data, host_layer, recurrent.bytes(),
+                                       cudaMemcpyHostToDevice, stream));
+        } else {
+            decode_recurrent_from_host(host_layer, recurrent, stream);
+        }
     }
     const Tensor hidden = continuation_hidden_slot(destination);
     CUDA_CHECK(cudaMemcpyAsync(hidden.data,
@@ -474,6 +557,74 @@ void StateImageDevicePool::copy_from_host(HostStateImageConstView source, std::i
                                              layer * host_layout_.dflash_local_layer_bytes),
                 v.bytes(), cudaMemcpyHostToDevice, stream));
         }
+    }
+}
+
+namespace {
+
+struct RecurrentStagingViews {
+    Tensor values;
+    Tensor group_scales;
+    Tensor slice_scales;
+};
+
+// Typed views of the staged encoded layer. The staging bytes mirror one Host recurrent layer, so
+// a single contiguous copy moves the whole encoded layer.
+RecurrentStagingViews recurrent_staging_views(const DeviceSpan& staging,
+                                              const StateImageHostLayout& layout) {
+    const LinearAttentionStatePoolSpec& linear = layout.spec.linear;
+    const StateImageRecurrentEncoding& encoding = layout.recurrent_encoding;
+    auto* base                                  = static_cast<std::byte*>(staging.data);
+    const auto elements = static_cast<std::int32_t>(static_cast<std::int64_t>(linear.key_head_dim) *
+                                                    linear.value_head_dim * linear.value_heads);
+    RecurrentStagingViews views;
+    if (layout.spec.host_recurrent == HostStateStorage::BFloat16) {
+        views.values = Tensor(base, DType::BF16,
+                              {linear.key_head_dim, linear.value_head_dim, linear.value_heads});
+        return views;
+    }
+    views.values = Tensor(base, DType::U8, {elements / 2});
+    views.group_scales =
+        Tensor(base + encoding.group_scale_offset, DType::U8,
+               {static_cast<std::int32_t>(elements / ops::kNvfp4SliceGroup)});
+    views.slice_scales =
+        Tensor(base + encoding.slice_scale_offset, DType::FP32, {linear.value_heads});
+    return views;
+}
+
+} // namespace
+
+void StateImageDevicePool::encode_recurrent_to_host(const Tensor& recurrent, std::byte* host_layer,
+                                                    cudaStream_t stream) const {
+    RecurrentStagingViews staged = recurrent_staging_views(recurrent_staging_, host_layout_);
+    if (host_layout_.spec.host_recurrent == HostStateStorage::BFloat16) {
+        ops::cast_fp32_to_bf16(recurrent, staged.values, stream);
+    } else {
+        ops::encode_nvfp4_slices(
+            recurrent,
+            static_cast<std::int64_t>(host_layout_.spec.linear.key_head_dim) *
+                host_layout_.spec.linear.value_head_dim,
+            staged.values, staged.group_scales, staged.slice_scales, stream);
+    }
+    CUDA_CHECK(cudaMemcpyAsync(host_layer, recurrent_staging_.data,
+                               host_layout_.linear_recurrent_layer_bytes, cudaMemcpyDeviceToHost,
+                               stream));
+}
+
+void StateImageDevicePool::decode_recurrent_from_host(const std::byte* host_layer,
+                                                      Tensor& recurrent, cudaStream_t stream) {
+    CUDA_CHECK(cudaMemcpyAsync(recurrent_staging_.data, host_layer,
+                               host_layout_.linear_recurrent_layer_bytes, cudaMemcpyHostToDevice,
+                               stream));
+    const RecurrentStagingViews staged = recurrent_staging_views(recurrent_staging_, host_layout_);
+    if (host_layout_.spec.host_recurrent == HostStateStorage::BFloat16) {
+        ops::cast_bf16_to_fp32(staged.values, recurrent, stream);
+    } else {
+        ops::decode_nvfp4_slices(
+            staged.values, staged.group_scales, staged.slice_scales,
+            static_cast<std::int64_t>(host_layout_.spec.linear.key_head_dim) *
+                host_layout_.spec.linear.value_head_dim,
+            recurrent, stream);
     }
 }
 

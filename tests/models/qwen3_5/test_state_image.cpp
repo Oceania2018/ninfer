@@ -6,10 +6,14 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <iostream>
+#include <random>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -178,6 +182,103 @@ void test_host_roundtrip(bool dflash, ninfer::DeviceContext& device, bool dflash
     expect(host.release(*reused), "HostStatePool releases the reused slot");
 }
 
+float bf16_rne(float value) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    bits += 0x7fffU + ((bits >> 16) & 1U);
+    bits &= 0xffff0000U;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+// An encoded Host image must restore conv, hidden and DFlash bytes exactly and the recurrent
+// state within the declared encoding: BF16 is exact RNE, NVFP4 is within one E2M1 step of the
+// 16-value group scale.
+void test_encoded_host_roundtrip(ninfer::HostStateStorage storage, ninfer::DeviceContext& device) {
+    q36::StateImageSpec spec{
+        .linear =
+            {
+                .layers         = 2,
+                .conv_channels  = 5,
+                .conv_width     = 3,
+                .value_heads    = 3,
+                .value_head_dim = 4,
+                .key_head_dim   = 32,
+                .slot_count     = 2,
+                .conv_dtype     = ninfer::DType::BF16,
+            },
+        .hidden = 7,
+        .dflash_local =
+            q36::DFlashLocalStateSpec{.layers = 2, .capacity = 17, .kv_heads = 2, .head_dim = 4},
+        .host_recurrent = storage,
+    };
+    ninfer::LayoutBuilder builder;
+    const q36::StateImageDeviceLayout layout = q36::plan_state_image_device_pool(builder, spec);
+    ninfer::DeviceArena arena(builder.finish(256));
+    q36::StateImageDevicePool pool({arena.base(), arena.capacity()}, layout);
+    fill_slot(pool, 0, 0x19);
+    pool.zero_slot(1, device.stream);
+    device.synchronize();
+
+    // Groups span four decades within a head, so group scales differ from the head scale while
+    // every group scale stays in the normal E4M3 range.
+    std::mt19937 rng(7U + static_cast<unsigned>(storage));
+    std::uniform_real_distribution<float> unit(-1.0F, 1.0F);
+    const std::size_t head = 32 * 4;
+    std::vector<std::vector<float>> recurrent(pool.linear().layer_count());
+    for (std::uint32_t layer = 0; layer < pool.linear().layer_count(); ++layer) {
+        recurrent[layer].resize(head * 3);
+        for (std::size_t i = 0; i < recurrent[layer].size(); ++i) {
+            const float decade  = std::pow(10.0F, -static_cast<float>((i / 16) % 4));
+            recurrent[layer][i] = unit(rng) * decade * (static_cast<float>(layer) + 1.0F);
+        }
+        recurrent[layer][5]       = 0.0F;
+        const ninfer::Tensor slot = pool.linear().recurrent_slot(layer, 0);
+        CUDA_CHECK(cudaMemcpy(slot.data, recurrent[layer].data(), slot.bytes(),
+                              cudaMemcpyHostToDevice));
+    }
+
+    ninfer::HostContextArena host_backing(layout.host.image_bytes, layout.host.image_bytes);
+    q36::HostStatePool host(host_backing, layout.host);
+    const auto handle = host.allocate();
+    expect(handle.has_value(), "encoded HostStatePool allocates its slot");
+    pool.copy_to_host(0, host.writable_view(*handle), device.transfer_stream);
+    pool.copy_from_host(host.view(*handle), 1, device.transfer_stream);
+    CUDA_CHECK(cudaStreamSynchronize(device.transfer_stream));
+
+    const std::string label = storage == ninfer::HostStateStorage::BFloat16 ? "BF16" : "NVFP4";
+    for (std::uint32_t layer = 0; layer < pool.linear().layer_count(); ++layer) {
+        expect_bytes(pool.linear().conv_slot(layer, 1), static_cast<unsigned char>(0x19 + layer),
+                     "encoded Host conv state is exact");
+        const ninfer::Tensor slot = pool.linear().recurrent_slot(layer, 1);
+        std::vector<float> restored(recurrent[layer].size());
+        CUDA_CHECK(cudaMemcpy(restored.data(), slot.data, slot.bytes(), cudaMemcpyDeviceToHost));
+        bool within = true;
+        for (std::size_t group = 0; group < restored.size() / 16; ++group) {
+            float group_max = 0.0F;
+            for (std::size_t k = 0; k < 16; ++k) {
+                group_max = std::max(group_max, std::abs(recurrent[layer][group * 16 + k]));
+            }
+            for (std::size_t k = 0; k < 16; ++k) {
+                const std::size_t i = group * 16 + k;
+                const float x       = recurrent[layer][i];
+                if (storage == ninfer::HostStateStorage::BFloat16) {
+                    within = within && restored[i] == bf16_rne(x);
+                } else {
+                    // A normal E4M3 group scale is within 1/16 of group_max/6 and E2M1 steps are
+                    // at most two scale units, so the error is at most one scale unit.
+                    within = within && std::abs(restored[i] - x) <= group_max / 6.0F * 1.0625F;
+                }
+            }
+        }
+        expect(within, label + " Host recurrent state restores within its encoding");
+    }
+    expect_bytes(pool.continuation_hidden_slot(1), 0x39, "encoded Host hidden state is exact");
+    const auto local_view = pool.dflash_local()->layer_view(0);
+    expect_bytes(local_view.k.slice(3, 1, 1), 0x49, "encoded Host DFlash state is exact");
+    expect(host.release(*handle), "encoded HostStatePool releases its slot");
+}
+
 void test_shared_host_capacity() {
     const PlannedPool planned           = plan_pool(false, 2);
     const ninfer::HostKVPageLayout page = ninfer::plan_host_kv_page_layout(
@@ -272,6 +373,8 @@ int main() {
     test_host_roundtrip(false, device);
     test_host_roundtrip(true, device);
     test_host_roundtrip(true, device, true);
+    test_encoded_host_roundtrip(ninfer::HostStateStorage::BFloat16, device);
+    test_encoded_host_roundtrip(ninfer::HostStateStorage::Nvfp4Group16, device);
     test_shared_host_capacity();
 
     return failures == 0 ? 0 : 1;

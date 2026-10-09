@@ -69,6 +69,7 @@ Main KV 页为 64 token；每种 KV 的物理字节数由其层数、几何和�
 | `max_concurrency` | 同时占用执行绑定的上限 C，范围 1–8 |
 | `context_cache.device_state_slots` | C 个基本 Device StateImage 之外的额外槽数，缺省为 C |
 | `context_cache.host_capacity_bytes` | StateImage、Main/backend KV、暂停快照及传输目的共用的 pinned Host 字节容量 |
+| `context_cache.host_state_storage` | Host StateImage 中 GDN recurrent state 的编码（FP32 / BF16 / NVFP4 G16），缺省为 BF16；Device state 始终为 FP32 |
 
 Main KV 容量曲线的页数下界为 `max(ceil(max_context / 64), C)`，上界为
 `C × ceil(max_context / 64)`。下界分别满足单请求独占最大上下文和 C 个最小页的几何要求。Native 同时

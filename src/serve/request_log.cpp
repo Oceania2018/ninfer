@@ -126,6 +126,18 @@ const char* kv_cache_name(ninfer::KvCacheStorage storage) {
     return "unknown";
 }
 
+const char* host_state_name(ninfer::HostStateStorage storage) {
+    switch (storage) {
+    case ninfer::HostStateStorage::Fp32:
+        return "fp32";
+    case ninfer::HostStateStorage::BFloat16:
+        return "bf16";
+    case ninfer::HostStateStorage::Nvfp4Group16:
+        return "nvfp4-group16";
+    }
+    return "unknown";
+}
+
 const char* kv_capacity_mode_name(ninfer::KvCapacityMode mode) {
     return mode == ninfer::KvCapacityMode::Automatic ? "auto" : "explicit";
 }
@@ -551,7 +563,9 @@ std::string format_server_start_json(
              {"context_cache", Json{{"enabled", cache.enabled},
                                     {"device_state_slots", cache.device_state_slots.value()},
                                     {"total_device_state_slots", total_device_state_slots},
-                                    {"host_capacity_bytes", cache.host_capacity_bytes.value()}}}};
+                                    {"host_capacity_bytes", cache.host_capacity_bytes.value()},
+                                    {"host_state_storage",
+                                     host_state_name(cache.host_state_storage)}}}};
     record["sampling_defaults"] =
         Json{{"thinking", preset_json(sampling_defaults.thinking)},
              {"non_thinking", preset_json(sampling_defaults.non_thinking)},

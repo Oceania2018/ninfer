@@ -907,6 +907,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--no-prefix-reuse` | disable compatible-prefix caching | prefix reuse on |
 | `--device-state-slots N` | extra Device StateImages beyond `max-concurrency` | `max-concurrency` |
 | `--host-context-mib N` | shared pinned Host budget for StateImages, KV and pause snapshots, including in-flight destinations | `8192 MiB + 8 native StateImages` |
+| `--host-state-dtype fp32\|bf16\|nvfp4` | Host StateImage encoding of the GDN recurrent state, applied on Device-to-Host backup and inverted on restore; Device state stays FP32. `fp32` is exact; `bf16` rounds once per backup; `nvfp4` stores E2M1 codes with an E4M3 scale per 16 values and an FP32 scale per value head. Qwen3.8-27B + DFlash2 Host StateImage: 187 / 115 / 63 MiB | `bf16` |
 | `--ctx-checkpoints N` | superseded prefix points kept per request chain before older ones are retired; `0` disables chain bounding ([CUA context checkpoints](maintainer/cua-context-checkpoints.md)) | `4` |
 | `--ctx-checkpoint-boundaries off\|turns` | where OpenAI requests that mark no `prompt_cache_breakpoint` get checkpoints: `off` keeps the protocol's single automatic point at the end of the prompt; `turns` (agent loops) places them at the end of the first message, the first user turn and the last history turn before the final one, and drops the automatic point once a history point is placed ([CUA context checkpoints](maintainer/cua-context-checkpoints.md#boundaries)) | `turns` |
 | `--no-thinking` | disable thinking by default | thinking on |

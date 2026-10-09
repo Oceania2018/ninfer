@@ -148,7 +148,8 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                 .slot_count     = state_image_slots,
                 .conv_dtype     = DType::BF16,
             },
-        .hidden = dimension(config.hidden_size),
+        .hidden         = dimension(config.hidden_size),
+        .host_recurrent = plan.context_cache.host_state_storage,
     };
     {
         const auto* draft =

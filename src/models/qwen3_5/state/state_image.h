@@ -7,6 +7,7 @@
 #include "core/linear_attention_state.h"
 #include "core/tensor.h"
 #include "core/transfer_work.h"
+#include "ninfer/types.h"
 
 #include <cuda_runtime_api.h>
 
@@ -28,6 +29,20 @@ struct StateImageSpec {
     LinearAttentionStatePoolSpec linear;
     std::int32_t hidden = 0;
     std::optional<DFlashLocalStateSpec> dflash_local;
+    // Host encoding of the FP32 Device recurrent state. Conv, hidden and DFlash components are
+    // always stored in their Device dtype.
+    HostStateStorage host_recurrent = HostStateStorage::Fp32;
+};
+
+// Byte layout of one layer's encoded recurrent state inside a Host StateImage. FP32 and BF16
+// use only `values`; NVFP4 stores E2M1 codes in `values`, then E4M3 group scales and FP32
+// per-value-head scales.
+struct StateImageRecurrentEncoding {
+    std::size_t values_bytes       = 0;
+    std::size_t group_scale_offset = 0;
+    std::size_t group_scale_bytes  = 0;
+    std::size_t slice_scale_offset = 0;
+    std::size_t slice_scale_bytes  = 0;
 };
 
 struct StateImageHostLayout {
@@ -36,6 +51,7 @@ struct StateImageHostLayout {
     std::size_t linear_conv_layer_bytes = 0;
     LayoutRegion linear_recurrent;
     std::size_t linear_recurrent_layer_bytes = 0;
+    StateImageRecurrentEncoding recurrent_encoding;
     LayoutRegion continuation_hidden;
     std::optional<LayoutRegion> dflash_local_k;
     std::optional<LayoutRegion> dflash_local_v;
@@ -47,6 +63,9 @@ struct StateImageDeviceLayout {
     LinearAttentionStatePoolLayout linear;
     TensorRegion continuation_hidden;
     std::optional<CyclicKVCacheLayout> dflash_local;
+    // One layer of encoded recurrent state, staged between the encode/decode Op and the
+    // Host copy. Present only when the Host encoding differs from the Device FP32 state.
+    std::optional<LayoutRegion> recurrent_staging;
     StateImageHostLayout host;
 };
 
@@ -173,10 +192,16 @@ public:
 
 private:
     void validate_host_layout(const StateImageHostLayout* layout, const std::byte* data) const;
+    void encode_recurrent_to_host(const Tensor& recurrent, std::byte* host_layer,
+                                  cudaStream_t stream) const;
+    void decode_recurrent_from_host(const std::byte* host_layer, Tensor& recurrent,
+                                    cudaStream_t stream);
 
     LinearAttentionStatePool linear_;
     Tensor continuation_hidden_;
     std::optional<CyclicKVCache> dflash_local_;
+    // Bound only for an encoded Host recurrent state; transfers on one stream reuse it in order.
+    DeviceSpan recurrent_staging_;
     StateImageHostLayout host_layout_;
 };
 

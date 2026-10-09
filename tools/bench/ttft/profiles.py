@@ -8,6 +8,7 @@ from decimal import Decimal
 # qwen3_8_27b_nvfp4: StateImageHostLayout sums 48 GDN conv/state regions and
 # continuation hidden, each aligned to 256 B (state/state_image.cpp). DFlash2 also
 # carries 5 local K/V layers of 2048 positions. MTP Full KV is in the KV arena.
+# Sizes are for exact FP32 Host state, so profiles sized by them select --host-state-dtype fp32.
 STATE_IMAGE_BYTES = 153_954_304
 DFLASH2_STATE_IMAGE_BYTES = 195_897_344
 
@@ -69,6 +70,7 @@ PROFILE_ARGS: dict[str, tuple[str, ...]] = {
         "--lm-head-draft",
         "--device-state-slots", 8,
         "--host-context-mib", _host_mib(8 * DFLASH2_STATE_IMAGE_BYTES),
+        "--host-state-dtype", "fp32",
     ),
     "cache-private-working-set": _args(
         "--max-context", 32768,
@@ -80,6 +82,7 @@ PROFILE_ARGS: dict[str, tuple[str, ...]] = {
         "--lm-head-draft",
         "--device-state-slots", 2,
         "--host-context-mib", _host_mib(2 * DFLASH2_STATE_IMAGE_BYTES),
+        "--host-state-dtype", "fp32",
     ),
     "cache-pressure-device": _args(
         "--max-context", 8192,
@@ -94,6 +97,7 @@ PROFILE_ARGS: dict[str, tuple[str, ...]] = {
         "--max-concurrency", 2,
         "--device-state-slots", 0,
         "--host-context-mib", _host_mib(4 * STATE_IMAGE_BYTES),
+        "--host-state-dtype", "fp32",
     ),
     "cache-pressure-kv-host": _args(
         "--max-context", 8192,
@@ -120,6 +124,7 @@ PROFILE_ARGS: dict[str, tuple[str, ...]] = {
         "--lm-head-draft",
         "--device-state-slots", 2,
         "--host-context-mib", _host_mib((49152 << 20) + 24 * STATE_IMAGE_BYTES),
+        "--host-state-dtype", "fp32",
     ),
     "cache-pressure-both-host": _args(
         "--max-context", 8192,
@@ -127,6 +132,7 @@ PROFILE_ARGS: dict[str, tuple[str, ...]] = {
         "--max-concurrency", 2,
         "--device-state-slots", 0,
         "--host-context-mib", _host_mib((8192 << 20) + 4 * STATE_IMAGE_BYTES),
+        "--host-state-dtype", "fp32",
     ),
     "cache-pressure-evict": _args(
         "--max-context", 8192,
@@ -275,6 +281,7 @@ PROFILE_ARGS: dict[str, tuple[str, ...]] = {
         "--max-concurrency", 4,
         "--vision",
         "--host-context-mib", _host_mib((8192 << 20) + 8 * STATE_IMAGE_BYTES),
+        "--host-state-dtype", "fp32",
     ),
     "preemption-replay": _args(
         "--max-context", 512,

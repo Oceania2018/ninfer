@@ -103,6 +103,14 @@ KvCacheStorage parse_kv_dtype(const char* text) {
     throw std::invalid_argument("invalid kv-dtype: " + value);
 }
 
+HostStateStorage parse_host_state_dtype(const char* text) {
+    const std::string value(text);
+    if (value == "fp32") { return HostStateStorage::Fp32; }
+    if (value == "bf16") { return HostStateStorage::BFloat16; }
+    if (value == "nvfp4") { return HostStateStorage::Nvfp4Group16; }
+    throw std::invalid_argument("invalid host-state-dtype: " + value);
+}
+
 KvCapacityPolicy parse_kv_capacity(const char* text) {
     if (std::string_view(text) == "auto") { return KvCapacityPolicy::automatic(); }
     const int value = parse_nonnegative_int(text, "kv-capacity");
@@ -121,7 +129,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--context-cost-presets FILE] "
            "[--max-request-mib N] [--media-cache-mib N] [--media-live-mib N] "
            "[--media-preprocess-threads N] "
-           "[--device-state-slots N] [--host-context-mib N] [--ctx-checkpoints N] "
+           "[--device-state-slots N] [--host-context-mib N] [--host-state-dtype fp32|bf16|nvfp4] "
+           "[--ctx-checkpoints N] "
            "[--ctx-checkpoint-boundaries off|turns] "
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
@@ -157,6 +166,8 @@ std::string serve_usage_text(const char* argv0) {
            "       --device-state-slots is extra capacity beyond active lanes; "
            "--host-context-mib bounds shared Host State/KV and in-flight storage in MiB\n"
            "       --host-context-mib accepts decimal MiB values that resolve to whole bytes\n"
+           "       --host-state-dtype encodes the GDN recurrent state of Host checkpoints "
+           "(default bf16; fp32 is exact, nvfp4 is the smallest); Device state stays fp32\n"
            "       --ctx-checkpoints keeps N superseded prefix points per request chain "
            "(default 4, 0 disables)\n"
            "       --ctx-checkpoint-boundaries turns checkpoints the first message, the first "
@@ -280,6 +291,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--host-context-mib") {
             options.context_cache.host_capacity_bytes =
                 parse_host_context_mib(require_value("--host-context-mib"));
+        } else if (arg == "--host-state-dtype") {
+            options.context_cache.host_state_storage =
+                parse_host_state_dtype(require_value("--host-state-dtype"));
         } else if (arg == "--request-log-jsonl") {
             options.request_log_jsonl = require_value("--request-log-jsonl");
             if (options.request_log_jsonl.empty()) {
