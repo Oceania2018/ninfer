@@ -98,6 +98,13 @@ int main() {
     failures += check(unknown_host_state_rejected, "--host-state-dtype accepted an unknown dtype");
     failures += check(kv_help.find("--host-state-dtype fp32|bf16|nvfp4") != std::string::npos,
                       "serve help omits --host-state-dtype");
+    failures += check(!defaults.context_cache.skip_media_tail,
+                      "media-tail checkpoints are skipped by default");
+    failures += check(parse({"ninfer-serve", "model.ninfer", "--ctx-checkpoint-skip-media-tail"})
+                          .context_cache.skip_media_tail,
+                      "--ctx-checkpoint-skip-media-tail did not skip media-tail checkpoints");
+    failures += check(kv_help.find("--ctx-checkpoint-skip-media-tail") != std::string::npos,
+                      "serve help omits --ctx-checkpoint-skip-media-tail");
 
     const ServeOptions model_alias =
         parse({"ninfer-serve", "model.ninfer", "--model-id", "deployment-alias"});

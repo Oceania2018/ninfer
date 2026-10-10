@@ -149,6 +149,10 @@ struct ContextCacheOptions {
     // Host StateImage encoding of the GDN recurrent state. FP32 is exact; BF16 and NVFP4 round
     // once per Host backup in exchange for proportionally more Host checkpoints per byte.
     HostStateStorage host_state_storage = HostStateStorage::BFloat16;
+    // Skip a request's private end-of-input and end-of-generation points when its final image
+    // lies after every shared prefix point. Agent loops that rebuild the trailing screenshot turn
+    // every request never resume from those points, which hold the image's KV and a StateImage.
+    bool skip_media_tail = false;
 };
 
 struct ContextCostOptions {

@@ -66,6 +66,8 @@ struct RequestBasePlanImpl {
     PrefixShortlistDigests prefix_digests;
     std::uint32_t prefix_identity_tag = 0;
     bool allow_prefix_reuse           = false;
+    // False when the private input and continuation points are skipped for a trailing image.
+    bool publish_tail = true;
 
     [[nodiscard]] bool accepts_capture(std::uint32_t frontier) const noexcept;
     [[nodiscard]] CaptureGroup capture_group(std::uint32_t frontier) const;

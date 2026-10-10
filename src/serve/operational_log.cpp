@@ -461,10 +461,11 @@ void OperationalLog::engine_capacity(const GenerationService& service) const {
                   product::format_pretty_bytes(memory.runtime_reservation_bytes),
                   product::format_pretty_bytes(memory.available_after_startup_bytes));
 
-    logger_->info("context | history {} | {} active + {} extra device states | host {}, state {}",
+    logger_->info("context | history {} | {} active + {} extra device states | host {}, state {}{}",
                   cache.enabled ? "on" : "off", engine.max_concurrency, *cache.device_state_slots,
                   product::format_pretty_bytes(*cache.host_capacity_bytes),
-                  host_state_name(cache.host_state_storage));
+                  host_state_name(cache.host_state_storage),
+                  cache.skip_media_tail ? " | media tail skipped" : "");
 
     if (service.options().enable_vision) {
         const ninfer::MediaCacheSummary media = service.media_cache_summary();

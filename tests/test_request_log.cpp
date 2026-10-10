@@ -206,7 +206,8 @@ int main() {
         server.at("engine").at("context_cache").at("device_state_slots") == 2 &&
             server.at("engine").at("context_cache").at("total_device_state_slots") == 4 &&
             server.at("engine").at("context_cache").at("host_capacity_bytes") == (64ULL << 20) &&
-            server.at("engine").at("context_cache").at("host_state_storage") == "bf16",
+            server.at("engine").at("context_cache").at("host_state_storage") == "bf16" &&
+            server.at("engine").at("context_cache").at("skip_media_tail") == false,
         "resolved context-cache configuration missing");
     failures += check(server.at("server").at("default_preserve_thinking") == true,
                       "server preserve-thinking default missing");

@@ -415,7 +415,8 @@ void ProgramImpl::install_binding(ContextTransaction& tx) {
         state.dflash_context_frontier = tx.reuse_frontier;
         state.tail_hidden_valid       = tx.source_tail_hidden;
         request.lifecycle             = Lifecycle::Prefilling;
-        request.publish_continuation  = tx.base->summary.publish_continuation;
+        request.publish_continuation  =
+            tx.base->summary.publish_continuation && tx.base->publish_tail;
         install_sampling(state, request, tx.base->sampling);
     }
     refresh_state_views(state);

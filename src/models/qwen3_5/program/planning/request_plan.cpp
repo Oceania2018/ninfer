@@ -177,8 +177,21 @@ RequestBasePlan ProgramImpl::plan_request(PreparedPromptData&& prompt,
             }
         };
         const auto& rewrite = prepared.identity.rewrite_checkpoint;
-        add(rewrite ? rewrite->recovery_frontier : base->summary.prompt_tokens,
-            runtime::CheckpointRole::InputReplay);
+        if (context_cache.skip_media_tail && !rewrite && base->vision_control_plan &&
+            !base->vision_control_plan->items.empty()) {
+            std::uint32_t shared_frontier = 0;
+            for (const auto& opportunity : prepared.context_cache.opportunities) {
+                if (opportunity.kind != PromptCacheMarkerKind::PrivateLongAnchor) {
+                    shared_frontier = std::max(shared_frontier, opportunity.frontier);
+                }
+            }
+            base->publish_tail =
+                base->vision_control_plan->items.back().token_begin < shared_frontier;
+        }
+        if (base->publish_tail) {
+            add(rewrite ? rewrite->recovery_frontier : base->summary.prompt_tokens,
+                runtime::CheckpointRole::InputReplay);
+        }
         for (const auto& opportunity : prepared.context_cache.opportunities) {
             add(opportunity.frontier, opportunity.kind == PromptCacheMarkerKind::PrivateLongAnchor
                                           ? runtime::CheckpointRole::LongAnchor

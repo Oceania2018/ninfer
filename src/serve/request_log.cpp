@@ -565,7 +565,8 @@ std::string format_server_start_json(
                                     {"total_device_state_slots", total_device_state_slots},
                                     {"host_capacity_bytes", cache.host_capacity_bytes.value()},
                                     {"host_state_storage",
-                                     host_state_name(cache.host_state_storage)}}}};
+                                     host_state_name(cache.host_state_storage)},
+                                    {"skip_media_tail", cache.skip_media_tail}}}};
     record["sampling_defaults"] =
         Json{{"thinking", preset_json(sampling_defaults.thinking)},
              {"non_thinking", preset_json(sampling_defaults.non_thinking)},
