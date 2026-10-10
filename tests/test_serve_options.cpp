@@ -100,10 +100,21 @@ int main() {
                       "serve help omits --host-state-dtype");
     failures += check(!defaults.context_cache.skip_media_tail,
                       "media-tail checkpoints are skipped by default");
-    failures += check(parse({"ninfer-serve", "model.ninfer", "--ctx-checkpoint-skip-media-tail"})
-                          .context_cache.skip_media_tail,
-                      "--ctx-checkpoint-skip-media-tail did not skip media-tail checkpoints");
-    failures += check(kv_help.find("--ctx-checkpoint-skip-media-tail") != std::string::npos,
+    failures += check(
+        parse({"ninfer-serve", "model.ninfer", "--ctx-checkpoint-skip-media-tail", "on"})
+            .context_cache.skip_media_tail,
+        "--ctx-checkpoint-skip-media-tail on did not skip media-tail checkpoints");
+    failures += check(
+        !parse({"ninfer-serve", "model.ninfer", "--ctx-checkpoint-skip-media-tail", "off"})
+             .context_cache.skip_media_tail,
+        "--ctx-checkpoint-skip-media-tail off skipped media-tail checkpoints");
+    bool unknown_media_tail_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--ctx-checkpoint-skip-media-tail", "yes"});
+    } catch (const std::invalid_argument&) { unknown_media_tail_rejected = true; }
+    failures += check(unknown_media_tail_rejected,
+                      "--ctx-checkpoint-skip-media-tail accepted a value other than on or off");
+    failures += check(kv_help.find("--ctx-checkpoint-skip-media-tail on|off") != std::string::npos,
                       "serve help omits --ctx-checkpoint-skip-media-tail");
 
     const ServeOptions model_alias =

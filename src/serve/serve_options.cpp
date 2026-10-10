@@ -131,7 +131,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--media-preprocess-threads N] "
            "[--device-state-slots N] [--host-context-mib N] [--host-state-dtype fp32|bf16|nvfp4] "
            "[--ctx-checkpoints N] "
-           "[--ctx-checkpoint-boundaries off|turns] [--ctx-checkpoint-skip-media-tail] "
+           "[--ctx-checkpoint-boundaries off|turns] [--ctx-checkpoint-skip-media-tail on|off] "
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
@@ -173,9 +173,9 @@ std::string serve_usage_text(const char* argv0) {
            "       --ctx-checkpoint-boundaries turns checkpoints the first message, the first "
            "user turn and the last history turn of OpenAI requests that mark no boundary "
            "(agent loops; default); off keeps one automatic point at the end of the prompt\n"
-           "       --ctx-checkpoint-skip-media-tail skips the private end-of-input and "
+           "       --ctx-checkpoint-skip-media-tail on skips the private end-of-input and "
            "end-of-generation points of requests whose final image follows every shared point "
-           "(agent loops that resend only the newest screenshot)\n"
+           "(agent loops that resend only the newest screenshot); off keeps them (default)\n"
            "       --default-thinking-budget caps model-origin thinking for enabled requests; "
            "control tokens count toward the request output limit\n"
            "       --preserve-thinking retains closed-turn assistant reasoning in later prompts\n"
@@ -292,7 +292,14 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 throw std::invalid_argument("--ctx-checkpoint-boundaries must be off or turns");
             }
         } else if (arg == "--ctx-checkpoint-skip-media-tail") {
-            options.context_cache.skip_media_tail = true;
+            const std::string value = require_value("--ctx-checkpoint-skip-media-tail");
+            if (value == "on") {
+                options.context_cache.skip_media_tail = true;
+            } else if (value == "off") {
+                options.context_cache.skip_media_tail = false;
+            } else {
+                throw std::invalid_argument("--ctx-checkpoint-skip-media-tail must be on or off");
+            }
         } else if (arg == "--host-context-mib") {
             options.context_cache.host_capacity_bytes =
                 parse_host_context_mib(require_value("--host-context-mib"));
