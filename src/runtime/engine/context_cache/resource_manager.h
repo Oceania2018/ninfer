@@ -14,6 +14,8 @@
 #include <span>
 #include <unordered_set>
 #include <stdexcept>
+#include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -1396,6 +1398,9 @@ private:
         return facts;
     }
 
+    // How many of the coldest Host release actions one reclaim choice ranks by value.
+    static constexpr std::size_t kHostRankWindow = 16;
+
     struct ActionRank {
         CacheRetentionPriority priority;
         std::uint64_t loss    = 0;
@@ -1637,15 +1642,64 @@ private:
             }
         }
         auto actions = program.plan_releases(allowed, excluded, {.host_bytes = required});
+        // Value ranking quotes recovery loss over every surviving point, so ranking every action
+        // grows quadratically with the StateImages held on Host. Rank only a window of the
+        // coldest actions instead. Cursor victims are ordered coldest first and an action is as
+        // recent as its most recent source; paused snapshots follow ordinary history in the
+        // Engine's explicit order. Held sources these rights may not revoke never enter the
+        // window. When nothing in the window is admissible, the next coldest actions replace it.
+        std::unordered_map<std::uint32_t, std::pair<Handle, std::size_t>> positions;
+        for (std::size_t i = 0; i < cursor.victims.size(); ++i) {
+            const auto handle = cursor.victims[i].handle;
+            positions.insert_or_assign(handle.index, std::pair{handle, i});
+        }
+        struct Candidate {
+            std::size_t snapshot;
+            std::size_t recency;
+            std::size_t action;
+        };
+        std::vector<Candidate> candidates;
+        candidates.reserve(actions.size());
+        for (std::size_t i = 0; i < actions.size(); ++i) {
+            if (!may_revoke(actions[i].sources, cursor.rights)) { continue; }
+            std::size_t snapshot_order = 0;
+            for (std::size_t snapshot = 0; snapshot < later_snapshots.size(); ++snapshot) {
+                if (contains(actions[i].sources, later_snapshots[snapshot])) {
+                    snapshot_order = snapshot + 1;
+                }
+            }
+            std::size_t recency = 0;
+            for (const auto handle : actions[i].sources) {
+                const auto found = positions.find(handle.index);
+                recency          = std::max(recency, found == positions.end() || found->second.first != handle
+                                                         ? cursor.victims.size()
+                                                         : found->second.second);
+            }
+            candidates.push_back({snapshot_order, recency, i});
+        }
+        std::sort(candidates.begin(), candidates.end(), [](const auto& left, const auto& right) {
+            return std::tie(left.snapshot, left.recency, left.action) <
+                   std::tie(right.snapshot, right.recency, right.action);
+        });
+        std::size_t next_candidate = 0;
+        std::vector<std::size_t> window;
+        const auto refill = [&] {
+            while (window.size() < kHostRankWindow && next_candidate < candidates.size()) {
+                window.push_back(candidates[next_candidate++].action);
+            }
+        };
         std::vector<Handle> selected;
         std::size_t released = 0;
         while (released < required) {
+            refill();
+            if (window.empty()) { return std::nullopt; }
             std::optional<std::size_t> best;
             std::vector<Handle> best_union;
             std::size_t best_bytes = 0;
             ActionRank best_rank;
             std::size_t best_snapshot_order = 0;
-            for (std::size_t i = 0; i < actions.size(); ++i) {
+            for (std::size_t slot = 0; slot < window.size(); ++slot) {
+                const auto i  = window[slot];
                 auto combined = selected;
                 for (const auto handle : actions[i].sources) {
                     if (!contains(combined, handle)) { combined.push_back(handle); }
@@ -1675,17 +1729,20 @@ private:
                 // Snapshot candidates retain the Engine's explicit youngest-first order.
                 if (!best || snapshot_order < best_snapshot_order ||
                     (snapshot_order == best_snapshot_order && less_rank(rank, best_rank))) {
-                    best                = i;
+                    best                = slot;
                     best_union          = std::move(combined);
                     best_bytes          = amount;
                     best_rank           = rank;
                     best_snapshot_order = snapshot_order;
                 }
             }
-            if (!best) { return std::nullopt; }
+            if (!best) {
+                window.clear();
+                continue;
+            }
             selected = std::move(best_union);
             released = best_bytes;
-            actions.erase(actions.begin() + *best);
+            window.erase(window.begin() + static_cast<std::ptrdiff_t>(*best));
         }
         return selected;
     }
